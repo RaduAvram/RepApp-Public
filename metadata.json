@@ -1,0 +1,9 @@
+{
+  "name": "TempoTrack",
+  "description": "A workout rep timer that tracks concentric and eccentric phases with detailed performance analytics and AI-powered tempo coaching.",
+  "requestFramePermissions": [
+    "screen-wake-lock",
+    "wake-lock"
+  ],
+  "majorCapabilities": []
+}

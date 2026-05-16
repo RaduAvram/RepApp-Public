@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --color-sleek-bg: #222425;
+  --color-sleek-card: #2e3133;
+  --color-sleek-up: #FFFFFF;
+  --color-sleek-down: #FFFFFF;
+  --color-sleek-text: #FFFFFF;
+  --color-sleek-muted: #b0b8bf;
+  --color-sleek-border: #495054;
+}
+
