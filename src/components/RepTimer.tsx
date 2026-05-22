@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Play, Pause, Square, RotateCcw, ChevronRight, Info, CheckCircle2, Maximize, Minimize } from 'lucide-react';
+import { Play, Pause, Square, CheckCircle2, Maximize, Minimize } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { Phase, Rep, WorkoutSession } from '../types';
-import { cn } from '../lib/utils';
+import { Phase, Rep, WorkoutSession, FpsLimit } from '../types';
+import { cn, triggerHaptic } from '../lib/utils';
 
 interface RepTimerProps {
   key?: React.Key;
@@ -19,8 +19,7 @@ interface RepTimerProps {
   onTogglePause: () => void;
   onReset: () => void;
   seamlessTransitions?: boolean;
-  onProgressUpdate?: (progress: number) => void;
-  currentRepProgress?: number;
+  fpsLimit?: FpsLimit;
 }
 
 export default function RepTimer({ 
@@ -36,8 +35,7 @@ export default function RepTimer({
   onTogglePause,
   onReset,
   seamlessTransitions = false,
-  onProgressUpdate,
-  currentRepProgress = 0
+  fpsLimit = 40
 }: RepTimerProps) {
   const [isActive, setIsActive] = useState(false);
   const [isCountingDown, setIsCountingDown] = useState(false);
@@ -46,12 +44,22 @@ export default function RepTimer({
   const [phaseStartTime, setPhaseStartTime] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showFullscreen, setShowFullscreen] = useState(true);
   const [isControlsVisible, setIsControlsVisible] = useState(true);
   const wakeLockRef = useRef<any>(null);
   
   const currentRepRef = useRef<Partial<Rep>>({});
   const timerRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Client-side detection for iOS to hide fullscreen button
+  useEffect(() => {
+    if (typeof window !== 'undefined' && navigator) {
+      const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
+                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      setShowFullscreen(!ios);
+    }
+  }, []);
 
   const requestWakeLock = async () => {
     if ('wakeLock' in navigator) {
@@ -158,6 +166,7 @@ export default function RepTimer({
   }, []);
 
   const toggleFullscreen = () => {
+    triggerHaptic(15);
     if (!containerRef.current) return;
     
     if (!document.fullscreenElement) {
@@ -173,7 +182,7 @@ export default function RepTimer({
 
   useEffect(() => {
     if (isFinished && isActive) {
-      stopTimer();
+      stopTimer(false);
     }
   }, [isFinished, isActive]);
 
@@ -196,20 +205,24 @@ export default function RepTimer({
   }, [isFinished, targetTempo, targetReps, targetSets]);
 
   const startTimer = () => {
+    triggerHaptic(20);
     setIsCountingDown(true);
     setCountdown(3);
     // Request wake lock early on user gesture
     requestWakeLock();
   };
 
-  const stopTimer = () => {
+  const stopTimer = (shouldResetSession = true) => {
+    triggerHaptic(35); // Heavier rumble on stop
     setIsActive(false);
     setIsCountingDown(false);
     setCurrentPhase(null);
     setPhaseStartTime(null);
     setElapsed(0);
     if (timerRef.current) window.cancelAnimationFrame(timerRef.current);
-    onReset();
+    if (shouldResetSession) {
+      onReset();
+    }
   };
 
   const nextPhase = useCallback(() => {
@@ -295,32 +308,25 @@ export default function RepTimer({
 
   useEffect(() => {
     if (isActive && phaseStartTime && currentPhase && !isPaused) {
+      // Global framerate limiter based on exact selected FPS setting
+      const frameInterval = 1000 / fpsLimit;
+      let lastTime = Date.now();
+
       const update = () => {
         const now = Date.now();
+        
+        if (frameInterval > 0) {
+          const delta = now - lastTime;
+          if (delta < frameInterval) {
+            timerRef.current = window.requestAnimationFrame(update);
+            return;
+          }
+          // Adjust lastTime to prevent drift
+          lastTime = now - (delta % frameInterval);
+        }
+
         const currentElapsed = Math.max(0, (now - phaseStartTime) / 1000);
         setElapsed(currentElapsed);
-        
-        if (onProgressUpdate) {
-          const eccentric = targetTempo.eccentric || 0;
-          const pauseBottom = targetTempo.pauseBottom || 0;
-          const concentric = targetTempo.concentric || 0;
-          const pauseTop = targetTempo.pauseTop || 0;
-          const totalRepTargetTime = eccentric + pauseBottom + concentric + pauseTop;
-          
-          const getAccumulatedTime = (p: Phase) => {
-            let acc = 0;
-            const phasesOrdered: Phase[] = ['concentric', 'pause_top', 'eccentric', 'pause_bottom'];
-            for (const ph of phasesOrdered) {
-              if (ph === p) break;
-              acc += getTargetForPhase(ph);
-            }
-            return acc;
-          };
-
-          const accumulated = getAccumulatedTime(currentPhase);
-          const repProgress = totalRepTargetTime > 0 ? (accumulated + currentElapsed) / totalRepTargetTime : 0;
-          onProgressUpdate(Math.min(0.99, repProgress));
-        }
 
         const target = getTargetForPhase(currentPhase);
         if (target === 0 || currentElapsed >= target) {
@@ -336,7 +342,7 @@ export default function RepTimer({
     return () => {
       if (timerRef.current) window.cancelAnimationFrame(timerRef.current);
     };
-  }, [isActive, phaseStartTime, currentPhase, nextPhase, isPaused]);
+  }, [isActive, phaseStartTime, currentPhase, nextPhase, isPaused, fpsLimit]);
 
   const getPhaseLabel = (phase: Phase) => {
     switch (phase) {
@@ -405,6 +411,24 @@ export default function RepTimer({
   
   const ringState = getRingState();
 
+  const currentRepProgress = (() => {
+    if (!isActive || !currentPhase) return 0;
+    const eccentric = targetTempo.eccentric || 0;
+    const pauseBottom = targetTempo.pauseBottom || 0;
+    const concentric = targetTempo.concentric || 0;
+    const pauseTop = targetTempo.pauseTop || 0;
+    const totalRepTargetTime = eccentric + pauseBottom + concentric + pauseTop;
+    if (totalRepTargetTime === 0) return 0;
+
+    let accumulated = 0;
+    const phasesOrdered: Phase[] = ['concentric', 'pause_top', 'eccentric', 'pause_bottom'];
+    for (const ph of phasesOrdered) {
+      if (ph === currentPhase) break;
+      accumulated += getTargetForPhase(ph);
+    }
+    return Math.min(0.99, (accumulated + elapsed) / totalRepTargetTime);
+  })();
+
   return (
     <div 
       ref={containerRef}
@@ -417,42 +441,41 @@ export default function RepTimer({
       {/* Real-time Background Gradient layers for hardware acceleration */}
       <div className="absolute inset-0 z-0 pointer-events-none bg-[#171717]" />
       
-      <motion.div
-        className="absolute inset-0 z-0 pointer-events-none"
-        initial={false}
-        animate={{
+      <div
+        className="absolute inset-0 z-0 pointer-events-none transition-all"
+        style={{
           background: `linear-gradient(135deg, ${ringState.bgStart} 0%, ${ringState.bgEnd} 100%)`,
           opacity: (!isPaused && (isActive || isCountingDown || isFinished)) ? 1 : 0,
+          transitionDuration: seamlessTransitions ? '1200ms' : '400ms',
+          transitionTimingFunction: 'linear',
+          willChange: 'opacity'
         }}
-        transition={{ 
-          opacity: { duration: seamlessTransitions ? 1.2 : 0.4, ease: "linear" },
-          background: { duration: seamlessTransitions ? 1.2 : 0.4, ease: "linear" }
-        }}
-        style={{ willChange: 'opacity, background' }}
       />
       
-      <motion.div
-        className="absolute inset-0 z-0 pointer-events-none"
-        animate={{
-          filter: `brightness(${Math.min(1.25, 1 + (((currentSet - 1) * targetReps + (currentRepCount - 1)) * 0.01))})`
+      <div
+        className="absolute inset-0 z-0 pointer-events-none transition-[filter] duration-500 ease-out"
+        style={{
+          filter: `brightness(${Math.min(1.25, 1 + (((currentSet - 1) * targetReps + (currentRepCount - 1)) * 0.01))})`,
+          willChange: 'filter'
         }}
-        transition={{ duration: 0.4 }}
       />
       
       {/* Dark Overlay to ensure circle visibility */}
       <div className="absolute inset-0 bg-black/60 z-0 pointer-events-none" />
 
-      {/* Fullscreen Toggle Button - Unified */}
-      <button
-        onClick={toggleFullscreen}
-        className={cn(
-          "absolute sm:top-6 sm:right-6 sm:bottom-auto bottom-0 right-0 z-30 p-2 bg-white/5 border border-white/10 text-sleek-muted hover:text-sleek-text transition-all duration-300",
-          (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
-        )}
-        title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-      >
-        {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
-      </button>
+      {/* Fullscreen Toggle Button - Unified, hidden on iOS */}
+      {showFullscreen && (
+        <button
+          onClick={toggleFullscreen}
+          className={cn(
+            "absolute sm:top-6 sm:right-6 sm:bottom-auto bottom-0 right-0 z-30 p-2 bg-white/5 border border-white/10 text-sleek-muted hover:text-sleek-text transition-all duration-300",
+            (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
+          )}
+          title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+        >
+          {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+        </button>
+      )}
       
       {/* Top: Rep Counter */}
       <div className="h-12 flex items-center justify-center w-full z-20">
@@ -535,6 +558,7 @@ export default function RepTimer({
               key={`ripple-${phaseStartTime}`}
               initial={{ opacity: 0.8, scale: 0.95, borderColor: ringState.color, borderWidth: 8 }}
               animate={{ opacity: 0, scale: 2.8, borderWidth: 2 }}
+              exit={{ opacity: 0 }}
               transition={{ 
                 duration: 0.6, 
                 ease: [0.22, 1, 0.36, 1] // easeOutQuart: snappier start, smoother finish

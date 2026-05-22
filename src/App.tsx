@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Settings2, ChevronDown, Smartphone } from 'lucide-react';
+import { ChevronDown, Smartphone } from 'lucide-react';
 import RepTimer from './components/RepTimer';
 import TempoSettings from './components/TempoSettings';
-import { Rep, WorkoutSession } from './types';
-import { cn } from './lib/utils';
+import { Rep, WorkoutSession, FpsLimit } from './types';
+import { cn, triggerHaptic } from './lib/utils';
 
 export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -12,7 +12,10 @@ export default function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [targetReps, setTargetReps] = useState(12);
   const [targetSets, setTargetSets] = useState(3);
-  const [currentRepProgress, setCurrentRepProgress] = useState(0);
+  const [fpsLimit, setFpsLimit] = useState<FpsLimit>(40);
+  const [batteryCharging, setBatteryCharging] = useState(false);
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
+
   const [session, setSession] = useState<WorkoutSession>({
     id: crypto.randomUUID(),
     exerciseName: 'Custom Exercise',
@@ -25,6 +28,25 @@ export default function App() {
       pauseTop: 1
     }
   });
+
+  // Query navigator.getBattery() for browser support
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
+      (navigator as any).getBattery().then((battery: any) => {
+        const checkBattery = () => {
+          setBatteryCharging(battery.charging);
+          setBatteryLevel(battery.level);
+        };
+        checkBattery();
+        battery.addEventListener('levelchange', checkBattery);
+        battery.addEventListener('chargingchange', checkBattery);
+        return () => {
+          battery.removeEventListener('levelchange', checkBattery);
+          battery.removeEventListener('chargingchange', checkBattery);
+        };
+      }).catch(() => {});
+    }
+  }, []);
 
   const totalRepsCompleted = session.reps.length;
   const isFinished = totalRepsCompleted >= targetReps * targetSets;
@@ -46,6 +68,7 @@ export default function App() {
   };
 
   const handleReset = () => {
+    triggerHaptic(30); // Heavy physical vibe on reset
     setSession(prev => ({
       ...prev,
       id: crypto.randomUUID(),
@@ -53,16 +76,17 @@ export default function App() {
       reps: []
     }));
     setIsPaused(false);
-    setCurrentRepProgress(0);
   };
 
   const togglePause = () => {
+    triggerHaptic(15);
     setIsPaused(!isPaused);
   };
 
   const controlsRef = React.useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
+    triggerHaptic(10);
     controlsRef.current?.scrollIntoView({ 
       behavior: 'smooth',
       block: 'start'
@@ -82,7 +106,7 @@ export default function App() {
       {/* Above the Fold (100dvh guarantees it fits mobile/tablet viewports even with browser UI) */}
       <div className="h-[100dvh] w-full flex flex-col">
         {/* Main UI Element (90% of screen height) */}
-        <main className="h-[90%] w-full pt-[25px] px-[25px] pb-[30px]">
+        <main className="h-[90%] w-full p-2.5 sm:pt-[25px] sm:px-[25px] sm:pb-[30px]">
           <div className="w-full h-full max-w-full mx-auto">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
@@ -99,13 +123,12 @@ export default function App() {
                 currentRepCount={currentRepInSet}
                 currentSet={currentSet}
                 totalRepsCompleted={totalRepsCompleted}
-                currentRepProgress={currentRepProgress}
                 isFinished={isFinished}
                 isPaused={isPaused}
                 onTogglePause={togglePause}
                 onReset={handleReset}
                 seamlessTransitions={seamlessTransitions}
-                onProgressUpdate={setCurrentRepProgress}
+                fpsLimit={fpsLimit}
               />
             </motion.div>
           </div>
@@ -134,17 +157,17 @@ export default function App() {
           <div className="flex items-center gap-4">
             <span className="text-[10px] text-sleek-muted uppercase tracking-widest font-bold">Target Reps</span>
             <div className="flex items-center gap-3 bg-sleek-card border border-sleek-border px-3 py-1.5">
-              <button onClick={() => setTargetReps(Math.max(1, targetReps - 1))} className="text-sleek-muted hover:text-sleek-up transition-colors px-1">-</button>
+              <button onClick={() => { triggerHaptic(10); setTargetReps(Math.max(1, targetReps - 1)); }} className="text-sleek-muted hover:text-sleek-up transition-colors px-1 cursor-pointer">-</button>
               <span className="font-bold text-sm tabular-nums w-6 text-center">{targetReps}</span>
-              <button onClick={() => setTargetReps(Math.min(50, targetReps + 1))} className="text-sleek-muted hover:text-sleek-up transition-colors px-1">+</button>
+              <button onClick={() => { triggerHaptic(10); setTargetReps(Math.min(50, targetReps + 1)); }} className="text-sleek-muted hover:text-sleek-up transition-colors px-1 cursor-pointer">+</button>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <span className="text-[10px] text-sleek-muted uppercase tracking-widest font-bold">Target Sets</span>
             <div className="flex items-center gap-3 bg-sleek-card border border-sleek-border px-3 py-1.5">
-              <button onClick={() => setTargetSets(Math.max(1, targetSets - 1))} className="text-sleek-muted hover:text-sleek-up transition-colors px-1">-</button>
+              <button onClick={() => { triggerHaptic(10); setTargetSets(Math.max(1, targetSets - 1)); }} className="text-sleek-muted hover:text-sleek-up transition-colors px-1 cursor-pointer">-</button>
               <span className="font-bold text-sm tabular-nums w-6 text-center">{targetSets}</span>
-              <button onClick={() => setTargetSets(Math.min(20, targetSets + 1))} className="text-sleek-muted hover:text-sleek-up transition-colors px-1">+</button>
+              <button onClick={() => { triggerHaptic(10); setTargetSets(Math.min(20, targetSets + 1)); }} className="text-sleek-muted hover:text-sleek-up transition-colors px-1 cursor-pointer">+</button>
             </div>
           </div>
         </div>
@@ -154,8 +177,8 @@ export default function App() {
 
         {/* Timings button */}
         <button 
-          onClick={() => setIsSettingsOpen(true)}
-          className="text-xs sm:text-sm font-bold text-sleek-muted hover:text-sleek-up uppercase tracking-widest transition-colors flex items-center gap-2 border border-sleek-border px-10 py-3 bg-sleek-card/50 shadow-sm"
+          onClick={() => { triggerHaptic(15); setIsSettingsOpen(true); }}
+          className="text-xs sm:text-sm font-bold text-sleek-muted hover:text-sleek-up uppercase tracking-widest transition-colors flex items-center gap-2 border border-sleek-border px-10 py-3 bg-sleek-card/50 shadow-sm cursor-pointer"
         >
           CHANGE TIMINGS
         </button>
@@ -168,6 +191,13 @@ export default function App() {
         onUpdateTempo={handleApplyTempo}
         seamlessTransitions={seamlessTransitions}
         onToggleSeamless={() => setSeamlessTransitions(!seamlessTransitions)}
+        fpsLimit={fpsLimit}
+        onChangeFps={(fps) => {
+          triggerHaptic(20);
+          setFpsLimit(fps);
+        }}
+        batteryCharging={batteryCharging}
+        batteryLevel={batteryLevel}
       />
     </div>
   );
