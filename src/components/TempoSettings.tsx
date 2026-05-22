@@ -282,8 +282,8 @@ export default function TempoSettings({
                             <div 
                               key={item.id}
                               className={cn(
-                                "flex items-center justify-between p-3.5 bg-sleek-bg border hover:border-sleek-up transition-all group relative",
-                                isCurrent ? "border-sleek-up/60 bg-sleek-up/5" : "border-sleek-border"
+                                "flex items-center justify-between p-3.5 bg-sleek-bg hover:border-sleek-up transition-all group relative",
+                                isCurrent ? "border-[3px] border-sleek-up bg-sleek-up/5" : "border border-sleek-border"
                               )}
                             >
                               <button
@@ -298,16 +298,6 @@ export default function TempoSettings({
                                   <span className="text-white">{item.tempo.eccentric}s</span>
                                   <span className="text-white/20">•</span>
                                   <span className="text-sleek-muted">{item.tempo.pauseBottom}s</span>
-                                  {isCurrent && (
-                                    <span className="ml-2 text-[8px] bg-sleek-up text-black px-1.5 py-0.5 font-extrabold uppercase tracking-widest shrink-0">
-                                      Active
-                                    </span>
-                                  )}
-                                  {item.pinned && (
-                                    <span className="ml-1.5 text-[8px] border border-sleek-up/40 text-sleek-up px-1.5 py-0.5 font-bold uppercase tracking-widest flex items-center gap-0.5 shrink-0">
-                                      <Pin size={6} className="fill-current" /> Pinned
-                                    </span>
-                                  )}
                                 </div>
                                 <div className="flex items-center gap-2 text-[9px] text-sleek-muted/60 font-semibold tracking-wider uppercase">
                                   <span>{item.source === 'randomized' ? 'Random Gen' : 'Custom Config'}</span>
