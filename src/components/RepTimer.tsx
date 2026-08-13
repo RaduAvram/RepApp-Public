@@ -1,9 +1,31 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Play, Pause, Square, CheckCircle2, Maximize, Minimize } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Phase, Rep, WorkoutSession, FpsLimit } from '../types';
 import { cn, triggerHaptic } from '../lib/utils';
+
+const PHASE_LABELS: Record<Phase, string> = {
+  eccentric: 'LOWER',
+  pause_bottom: 'PAUSE',
+  concentric: 'LIFT',
+  pause_top: 'HOLD'
+};
+
+const PHASES_ORDER: readonly Phase[] = ['concentric', 'pause_top', 'eccentric', 'pause_bottom'];
+
+const easeInOutCubic = (t: number) => 
+  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+const RING_THEMES = {
+  finished: { offset: 0, color: "#22c55e", bgStart: "#22c55e", bgEnd: "#10b981" },
+  countdown: { offset: 1244, color: "#fb923c", bgStart: "#fb923c", bgEnd: "#f97316" },
+  idle: { offset: 1244, color: "var(--color-sleek-muted)", bgStart: "#262626", bgEnd: "#171717" },
+  concentric: { color: "#fb923c", bgStart: "#fb923c", bgEnd: "#f97316" },
+  pause_top: { color: "#ef4444", bgStart: "#ef4444", bgEnd: "#e11d48" },
+  eccentric: { color: "#eab308", bgStart: "#eab308", bgEnd: "#d97706" },
+  pause_bottom: { offset: 1244, color: "#22c55e", bgStart: "#22c55e", bgEnd: "#10b981" }
+};
 
 interface RepTimerProps {
   key?: React.Key;
@@ -46,10 +68,10 @@ export default function RepTimer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showFullscreen, setShowFullscreen] = useState(true);
   const [isControlsVisible, setIsControlsVisible] = useState(true);
+  const isControlsVisibleRef = useRef(true);
   const wakeLockRef = useRef<any>(null);
   
   const currentRepRef = useRef<Partial<Rep>>({});
-  const timerRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Client-side detection for iOS to hide fullscreen button
@@ -61,21 +83,20 @@ export default function RepTimer({
     }
   }, []);
 
-  const requestWakeLock = async () => {
+  const requestWakeLock = useCallback(async () => {
     if ('wakeLock' in navigator) {
       try {
         wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
       } catch (err) {
-        // Only log if it's not a policy error (to avoid console spam in restricted environments)
         const errorMsg = err instanceof Error ? err.message : String(err);
         if (!errorMsg.toLowerCase().includes('permissions policy') && !errorMsg.toLowerCase().includes('not allowed')) {
           console.error('Wake Lock failed:', err);
         }
       }
     }
-  };
+  }, []);
 
-  const releaseWakeLock = async () => {
+  const releaseWakeLock = useCallback(async () => {
     if (wakeLockRef.current) {
       try {
         await wakeLockRef.current.release();
@@ -84,7 +105,7 @@ export default function RepTimer({
         console.error('Wake Lock release failed:', err);
       }
     }
-  };
+  }, []);
 
   // Wake Lock management
   useEffect(() => {
@@ -103,7 +124,7 @@ export default function RepTimer({
     } else {
       releaseWakeLock();
     }
-  }, [isActive, isPaused]);
+  }, [isActive, isPaused, requestWakeLock, releaseWakeLock]);
 
   const getTargetForPhase = useCallback((phase: Phase) => {
     switch (phase) {
@@ -117,26 +138,32 @@ export default function RepTimer({
   // Handle pause/resume sync
   useEffect(() => {
     if (!isPaused && isActive && phaseStartTime !== null && currentPhase) {
-      // Adjust phaseStartTime to account for the time spent paused
       setPhaseStartTime(Date.now() - (elapsed * 1000));
     }
   }, [isPaused]);
 
+  // Activity detection with passive listeners and non-redundant state updates
   useEffect(() => {
     let idleTimer: ReturnType<typeof setTimeout>;
     
     const handleActivity = () => {
-      setIsControlsVisible(true);
+      if (!isControlsVisibleRef.current) {
+        isControlsVisibleRef.current = true;
+        setIsControlsVisible(true);
+      }
       clearTimeout(idleTimer);
       if (!isPaused) {
-        idleTimer = setTimeout(() => setIsControlsVisible(false), 10000);
+        idleTimer = setTimeout(() => {
+          isControlsVisibleRef.current = false;
+          setIsControlsVisible(false);
+        }, 10000);
       }
     };
 
     handleActivity(); // Initial start
     
-    const events = ['mousemove', 'mousedown', 'touchstart', 'keydown', 'wheel'];
-    events.forEach(e => document.addEventListener(e, handleActivity));
+    const events = ['mousemove', 'mousedown', 'touchstart', 'keydown', 'wheel'] as const;
+    events.forEach(e => document.addEventListener(e, handleActivity, { passive: true }));
     
     return () => {
       clearTimeout(idleTimer);
@@ -145,7 +172,7 @@ export default function RepTimer({
   }, [isPaused]);
 
   useEffect(() => {
-    const handlePopState = (e: PopStateEvent) => {
+    const handlePopState = () => {
       if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
       }
@@ -165,7 +192,7 @@ export default function RepTimer({
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
     triggerHaptic(15);
     if (!containerRef.current) return;
     
@@ -178,21 +205,30 @@ export default function RepTimer({
     } else {
       document.exitFullscreen();
     }
-  };
+  }, []);
+
+  const stopTimer = useCallback((shouldResetSession = true) => {
+    triggerHaptic(35); // Heavier rumble on stop
+    setIsActive(false);
+    setIsCountingDown(false);
+    setCurrentPhase(null);
+    setPhaseStartTime(null);
+    setElapsed(0);
+    if (shouldResetSession) {
+      onReset();
+    }
+  }, [onReset]);
 
   useEffect(() => {
     if (isFinished && isActive) {
       stopTimer(false);
     }
-  }, [isFinished, isActive]);
+  }, [isFinished, isActive, stopTimer]);
 
   useEffect(() => {
     if (isFinished) {
-      // Calculate workout difficulty (total time in seconds) to scale confetti
       const repDuration = targetTempo.concentric + targetTempo.pauseTop + (targetTempo.eccentric || 0) + (targetTempo.pauseBottom || 0);
       const totalSessionSeconds = repDuration * targetReps * targetSets;
-      
-      // Base: 100 particles. Max: 400 particles.
       const particles = Math.min(400, Math.max(100, Math.floor(totalSessionSeconds * 0.5)));
 
       confetti({
@@ -204,26 +240,12 @@ export default function RepTimer({
     }
   }, [isFinished, targetTempo, targetReps, targetSets]);
 
-  const startTimer = () => {
+  const startTimer = useCallback(() => {
     triggerHaptic(20);
     setIsCountingDown(true);
     setCountdown(3);
-    // Request wake lock early on user gesture
     requestWakeLock();
-  };
-
-  const stopTimer = (shouldResetSession = true) => {
-    triggerHaptic(35); // Heavier rumble on stop
-    setIsActive(false);
-    setIsCountingDown(false);
-    setCurrentPhase(null);
-    setPhaseStartTime(null);
-    setElapsed(0);
-    if (timerRef.current) window.cancelAnimationFrame(timerRef.current);
-    if (shouldResetSession) {
-      onReset();
-    }
-  };
+  }, [requestWakeLock]);
 
   const nextPhase = useCallback(() => {
     if (!currentPhase || !phaseStartTime) return;
@@ -257,7 +279,6 @@ export default function RepTimer({
         };
         onRepComplete(completeRep);
 
-        // Start next rep automatically
         currentRepRef.current = { 
           id: crypto.randomUUID(), 
           timestamp: Date.now(),
@@ -274,7 +295,7 @@ export default function RepTimer({
     setCurrentPhase(nextPhaseTarget);
     setPhaseStartTime(Date.now());
     setElapsed(0);
-  }, [currentPhase, phaseStartTime, onRepComplete, getTargetForPhase]);
+  }, [currentPhase, phaseStartTime, onRepComplete]);
 
   // Countdown effect
   useEffect(() => {
@@ -306,112 +327,77 @@ export default function RepTimer({
     }
   }, [isCountingDown, isPaused]);
 
+  // High-precision, frame-rate controlled animation loop
   useEffect(() => {
     if (isActive && phaseStartTime && currentPhase && !isPaused) {
-      // Global framerate limiter based on exact selected FPS setting
-      const frameInterval = 1000 / fpsLimit;
-      let lastTime = Date.now();
+      const frameInterval = fpsLimit > 0 ? 1000 / fpsLimit : 0;
+      let lastTime = performance.now();
+      let animId: number;
 
-      const update = () => {
-        const now = Date.now();
-        
+      const update = (nowTime: number) => {
         if (frameInterval > 0) {
-          const delta = now - lastTime;
+          const delta = nowTime - lastTime;
           if (delta < frameInterval) {
-            timerRef.current = window.requestAnimationFrame(update);
+            animId = window.requestAnimationFrame(update);
             return;
           }
-          // Adjust lastTime to prevent drift
-          lastTime = now - (delta % frameInterval);
+          lastTime = nowTime - (delta % frameInterval);
         }
 
+        const now = Date.now();
         const currentElapsed = Math.max(0, (now - phaseStartTime) / 1000);
         setElapsed(currentElapsed);
 
         const target = getTargetForPhase(currentPhase);
         if (target === 0 || currentElapsed >= target) {
           nextPhase();
+          return;
         }
         
-        timerRef.current = window.requestAnimationFrame(update);
+        animId = window.requestAnimationFrame(update);
       };
-      timerRef.current = window.requestAnimationFrame(update);
-    } else {
-      if (timerRef.current) window.cancelAnimationFrame(timerRef.current);
-    }
-    return () => {
-      if (timerRef.current) window.cancelAnimationFrame(timerRef.current);
-    };
-  }, [isActive, phaseStartTime, currentPhase, nextPhase, isPaused, fpsLimit]);
 
-  const getPhaseLabel = (phase: Phase) => {
-    switch (phase) {
-      case 'eccentric': return 'LOWER';
-      case 'pause_bottom': return 'PAUSE';
-      case 'concentric': return 'LIFT';
-      case 'pause_top': return 'HOLD';
+      animId = window.requestAnimationFrame(update);
+      return () => window.cancelAnimationFrame(animId);
     }
-  };
+  }, [isActive, phaseStartTime, currentPhase, nextPhase, isPaused, fpsLimit, getTargetForPhase]);
 
-  const getRingState = () => {
-    if (isFinished) {
-      return { offset: 0, color: "#22c55e", bgStart: "#22c55e", bgEnd: "#10b981" };
-    }
-    if (isCountingDown) {
-      return { offset: 1244, color: "#fb923c", bgStart: "#fb923c", bgEnd: "#f97316" };
-    }
-    if (!currentPhase) return { offset: 1244, color: "var(--color-sleek-muted)", bgStart: "#262626", bgEnd: "#171717" };
+  const ringState = useMemo(() => {
+    if (isFinished) return RING_THEMES.finished;
+    if (isCountingDown) return RING_THEMES.countdown;
+    if (!currentPhase) return RING_THEMES.idle;
     
     const target = getTargetForPhase(currentPhase);
     const rawProgress = target > 0 ? Math.min(elapsed / target, 1) : 1;
-    
-    // Smooth ease-in-out cubic function for a dynamic, energetic acceleration
-    const progress = rawProgress < 0.5 
-      ? 4 * rawProgress * rawProgress * rawProgress 
-      : 1 - Math.pow(-2 * rawProgress + 2, 3) / 2;
+    const progress = easeInOutCubic(rawProgress);
     
     switch (currentPhase) {
       case 'concentric':
-        // Up: Loads clockwise (0% -> 100%)
         return { 
           offset: 1244 * (1 - progress), 
-          color: "#fb923c", // Brighter Orange
-          bgStart: "#fb923c",
-          bgEnd: "#f97316" 
+          ...RING_THEMES.concentric
         };
       case 'pause_top':
         return { 
           offset: 0, 
-          color: "#ef4444", // Red
-          bgStart: "#ef4444",
-          bgEnd: "#e11d48" // Slight shift to rose
+          ...RING_THEMES.pause_top
         };
       case 'eccentric':
-        // Down: Unloads counter-clockwise (100% -> 0%)
         return { 
           offset: 1244 * progress, 
-          color: "#eab308", // Yellow
-          bgStart: "#eab308",
-          bgEnd: "#d97706" // Slight shift to amber
+          ...RING_THEMES.eccentric
         };
       case 'pause_bottom':
-        return { 
-          offset: 1244, 
-          color: "#22c55e", // Green
-          bgStart: "#22c55e",
-          bgEnd: "#10b981" // Slight shift to emerald
-        };
+        return RING_THEMES.pause_bottom;
       default:
-        return { offset: 1244, color: "var(--color-sleek-muted)", bgStart: "#262626", bgEnd: "#171717" };
+        return RING_THEMES.idle;
     }
-  };
+  }, [isFinished, isCountingDown, currentPhase, getTargetForPhase, elapsed]);
 
   const currentPhaseTarget = currentPhase ? getTargetForPhase(currentPhase) : 1;
   const phaseProgress = (currentPhase && currentPhaseTarget > 0) ? Math.min(elapsed / currentPhaseTarget, 1) : 1;
-  
-  const ringState = getRingState();
 
-  const currentRepProgress = (() => {
+  const currentRepProgress = useMemo(() => {
     if (!isActive || !currentPhase) return 0;
     const eccentric = targetTempo.eccentric || 0;
     const pauseBottom = targetTempo.pauseBottom || 0;
@@ -421,13 +407,12 @@ export default function RepTimer({
     if (totalRepTargetTime === 0) return 0;
 
     let accumulated = 0;
-    const phasesOrdered: Phase[] = ['concentric', 'pause_top', 'eccentric', 'pause_bottom'];
-    for (const ph of phasesOrdered) {
+    for (const ph of PHASES_ORDER) {
       if (ph === currentPhase) break;
       accumulated += getTargetForPhase(ph);
     }
     return Math.min(0.99, (accumulated + elapsed) / totalRepTargetTime);
-  })();
+  }, [isActive, currentPhase, targetTempo, getTargetForPhase, elapsed]);
 
   return (
     <div 
@@ -561,7 +546,7 @@ export default function RepTimer({
               exit={{ opacity: 0 }}
               transition={{ 
                 duration: 0.6, 
-                ease: [0.22, 1, 0.36, 1] // easeOutQuart: snappier start, smoother finish
+                ease: [0.22, 1, 0.36, 1]
               }}
               className="absolute inset-0 rounded-full pointer-events-none z-0 will-change-[transform,opacity,border-width]"
               style={{ borderStyle: 'solid' }}
@@ -586,7 +571,7 @@ export default function RepTimer({
                 animate={{ stroke: ringState.color }}
                 transition={{ 
                   stroke: { duration: 0.35, ease: "linear" },
-                  strokeDashoffset: { duration: 0 } // Important: dashoffset is handled by RAF, but we want zero animation interference
+                  strokeDashoffset: { duration: 0 }
                 }}
                 strokeLinecap="round"
                 className="will-change-[stroke-dashoffset,stroke]"
@@ -668,11 +653,12 @@ export default function RepTimer({
                     <div
                       style={{
                         transform: currentPhase === 'pause_top' && !isPaused
-                          ? `translate(${Math.sin(elapsed * 20) * 1}px, ${Math.cos(elapsed * 18) * 1}px)`
-                          : 'none'
+                          ? `translate3d(${Math.sin(elapsed * 20)}px, ${Math.cos(elapsed * 18)}px, 0)`
+                          : 'none',
+                        willChange: currentPhase === 'pause_top' && !isPaused ? 'transform' : 'auto'
                       }}
                     >
-                      {isPaused ? 'SESSION PAUSED' : (currentPhase && getPhaseLabel(currentPhase))}
+                      {isPaused ? 'SESSION PAUSED' : (currentPhase ? PHASE_LABELS[currentPhase] : '')}
                     </div>
                   </motion.div>
                 </motion.div>
@@ -708,7 +694,7 @@ export default function RepTimer({
               <>
                 <motion.button
                   whileTap={{ scale: 0.98 }}
-                  onClick={stopTimer}
+                  onClick={() => stopTimer(true)}
                   className={cn(
                     "w-1/4 flex items-center justify-center bg-[#1d1d1d] border-[#38393a] border-[3px] text-white",
                     (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"

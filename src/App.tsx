@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { motion } from 'framer-motion';
 import { ChevronDown, Smartphone } from 'lucide-react';
 import RepTimer from './components/RepTimer';
 import TempoSettings from './components/TempoSettings';
 import { Rep, WorkoutSession, FpsLimit } from './types';
-import { cn, triggerHaptic } from './lib/utils';
+import { triggerHaptic } from './lib/utils';
 
 export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -16,7 +16,7 @@ export default function App() {
   const [batteryCharging, setBatteryCharging] = useState(false);
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
 
-  const [session, setSession] = useState<WorkoutSession>({
+  const [session, setSession] = useState<WorkoutSession>(() => ({
     id: crypto.randomUUID(),
     exerciseName: 'Custom Exercise',
     startTime: Date.now(),
@@ -27,25 +27,37 @@ export default function App() {
       concentric: 3,
       pauseTop: 1
     }
-  });
+  }));
 
-  // Query navigator.getBattery() for browser support
+  // Query navigator.getBattery() for browser support with proper listener cleanup
   useEffect(() => {
+    let isMounted = true;
+    let batteryObj: any = null;
+
+    const checkBattery = () => {
+      if (batteryObj && isMounted) {
+        setBatteryCharging(batteryObj.charging);
+        setBatteryLevel(batteryObj.level);
+      }
+    };
+
     if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
       (navigator as any).getBattery().then((battery: any) => {
-        const checkBattery = () => {
-          setBatteryCharging(battery.charging);
-          setBatteryLevel(battery.level);
-        };
+        if (!isMounted) return;
+        batteryObj = battery;
         checkBattery();
         battery.addEventListener('levelchange', checkBattery);
         battery.addEventListener('chargingchange', checkBattery);
-        return () => {
-          battery.removeEventListener('levelchange', checkBattery);
-          battery.removeEventListener('chargingchange', checkBattery);
-        };
       }).catch(() => {});
     }
+
+    return () => {
+      isMounted = false;
+      if (batteryObj) {
+        batteryObj.removeEventListener('levelchange', checkBattery);
+        batteryObj.removeEventListener('chargingchange', checkBattery);
+      }
+    };
   }, []);
 
   const totalRepsCompleted = session.reps.length;
@@ -53,21 +65,21 @@ export default function App() {
   const currentSet = Math.min(Math.floor(totalRepsCompleted / targetReps) + 1, targetSets);
   const currentRepInSet = isFinished ? targetReps : (totalRepsCompleted % targetReps) + 1;
 
-  const handleRepComplete = (rep: Rep) => {
+  const handleRepComplete = useCallback((rep: Rep) => {
     setSession(prev => ({
       ...prev,
       reps: [...prev.reps, rep]
     }));
-  };
+  }, []);
 
-  const handleApplyTempo = (tempo: WorkoutSession['targetTempo']) => {
+  const handleApplyTempo = useCallback((tempo: WorkoutSession['targetTempo']) => {
     setSession(prev => ({
       ...prev,
       targetTempo: tempo
     }));
-  };
+  }, []);
 
-  const handleReset = () => {
+  const handleReset = useCallback(() => {
     triggerHaptic(30); // Heavy physical vibe on reset
     setSession(prev => ({
       ...prev,
@@ -76,22 +88,35 @@ export default function App() {
       reps: []
     }));
     setIsPaused(false);
-  };
+  }, []);
 
-  const togglePause = () => {
+  const togglePause = useCallback(() => {
     triggerHaptic(15);
-    setIsPaused(!isPaused);
-  };
+    setIsPaused(prev => !prev);
+  }, []);
 
-  const controlsRef = React.useRef<HTMLDivElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     triggerHaptic(10);
     controlsRef.current?.scrollIntoView({ 
       behavior: 'smooth',
       block: 'start'
     });
-  };
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setIsSettingsOpen(false);
+  }, []);
+
+  const handleToggleSeamless = useCallback(() => {
+    setSeamlessTransitions(prev => !prev);
+  }, []);
+
+  const handleChangeFps = useCallback((fps: FpsLimit) => {
+    triggerHaptic(20);
+    setFpsLimit(fps);
+  }, []);
 
   return (
     <div className="min-h-screen bg-sleek-bg text-sleek-text font-sans selection:bg-sleek-up selection:text-sleek-bg overflow-x-hidden">
@@ -186,16 +211,13 @@ export default function App() {
 
       <TempoSettings 
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={handleCloseSettings}
         tempo={session.targetTempo}
         onUpdateTempo={handleApplyTempo}
         seamlessTransitions={seamlessTransitions}
-        onToggleSeamless={() => setSeamlessTransitions(!seamlessTransitions)}
+        onToggleSeamless={handleToggleSeamless}
         fpsLimit={fpsLimit}
-        onChangeFps={(fps) => {
-          triggerHaptic(20);
-          setFpsLimit(fps);
-        }}
+        onChangeFps={handleChangeFps}
         batteryCharging={batteryCharging}
         batteryLevel={batteryLevel}
       />

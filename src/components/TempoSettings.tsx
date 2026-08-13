@@ -1,8 +1,15 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronUp, ChevronDown, ExternalLink, Dumbbell, Battery, BatteryCharging, History, Trash2, ArrowLeft, Pin } from 'lucide-react';
 import { WorkoutSession, FpsLimit, SavedTempo } from '../types';
 import { cn, triggerHaptic } from '../lib/utils';
+
+const SETTINGS_PHASES = [
+  { key: 'concentric' as const, label: 'LIFT', color: 'text-sleek-up' },
+  { key: 'pauseTop' as const, label: 'HOLD', color: 'text-sleek-muted' },
+  { key: 'eccentric' as const, label: 'LOWER', color: 'text-sleek-down' },
+  { key: 'pauseBottom' as const, label: 'PAUSE', color: 'text-sleek-muted' },
+] as const;
 
 interface TempoSettingsProps {
   isOpen: boolean;
@@ -29,8 +36,8 @@ export default function TempoSettings({
   batteryCharging,
   batteryLevel
  }: TempoSettingsProps) {
-  const [showHistory, setShowHistory] = React.useState(false);
-  const [savedTempos, setSavedTempos] = React.useState<SavedTempo[]>(() => {
+  const [showHistory, setShowHistory] = useState(false);
+  const [savedTempos, setSavedTempos] = useState<SavedTempo[]>(() => {
     try {
       const stored = localStorage.getItem('tempotrack_timings_history');
       return stored ? JSON.parse(stored) : [];
@@ -40,7 +47,7 @@ export default function TempoSettings({
   });
 
   // Load history whenever dialog opens
-  React.useEffect(() => {
+  useEffect(() => {
     if (isOpen) {
       try {
         const stored = localStorage.getItem('tempotrack_timings_history');
@@ -55,7 +62,7 @@ export default function TempoSettings({
     }
   }, [isOpen]);
 
-  const saveTempoToHistory = (newTempo: WorkoutSession['targetTempo'], source: 'randomized' | 'user') => {
+  const saveTempoToHistory = useCallback((newTempo: WorkoutSession['targetTempo'], source: 'randomized' | 'user') => {
     setSavedTempos(prev => {
       // Check if the most recent entry has the exact same tempo to avoid spam/redundancy
       if (prev.length > 0) {
@@ -81,21 +88,26 @@ export default function TempoSettings({
       localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
       return updated;
     });
-  };
+  }, []);
 
-  const isCurrentTempo = (t: SavedTempo['tempo']) => {
+  const isCurrentTempo = useCallback((t: SavedTempo['tempo']) => {
     return tempo.concentric === t.concentric &&
            tempo.pauseTop === t.pauseTop &&
            tempo.eccentric === t.eccentric &&
            tempo.pauseBottom === t.pauseBottom;
-  };
+  }, [tempo]);
 
   const isCurrentlyPinned = savedTempos.some(item => isCurrentTempo(item.tempo) && item.pinned);
 
-  const handlePinCurrent = () => {
+  const handlePinCurrent = useCallback(() => {
     triggerHaptic(20);
     setSavedTempos(prev => {
-      const existingIdx = prev.findIndex(item => isCurrentTempo(item.tempo));
+      const existingIdx = prev.findIndex(item => 
+        tempo.concentric === item.tempo.concentric &&
+        tempo.pauseTop === item.tempo.pauseTop &&
+        tempo.eccentric === item.tempo.eccentric &&
+        tempo.pauseBottom === item.tempo.pauseBottom
+      );
       let updated: SavedTempo[];
       if (existingIdx !== -1) {
         updated = prev.map((item, idx) => 
@@ -114,9 +126,9 @@ export default function TempoSettings({
       localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
       return updated;
     });
-  };
+  }, [tempo]);
 
-  const handleTogglePin = (id: string, e: React.MouseEvent) => {
+  const handleTogglePin = useCallback((id: string, e: React.MouseEvent) => {
     e.stopPropagation(); // Avoid triggering apply tempo
     triggerHaptic(15);
     setSavedTempos(prev => {
@@ -126,9 +138,9 @@ export default function TempoSettings({
       localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
       return updated;
     });
-  };
+  }, []);
 
-  const sortedSavedTempos = React.useMemo(() => {
+  const sortedSavedTempos = useMemo(() => {
     return [...savedTempos].sort((a, b) => {
       if (a.pinned && !b.pinned) return -1;
       if (!a.pinned && b.pinned) return 1;
@@ -136,7 +148,7 @@ export default function TempoSettings({
     });
   }, [savedTempos]);
 
-  const handleRandomize = () => {
+  const handleRandomize = useCallback(() => {
     triggerHaptic(25); // Slightly heavier rumble for randomized generation
     const randomized = {
       concentric: Math.floor(Math.random() * 5) + 1,
@@ -146,57 +158,47 @@ export default function TempoSettings({
     };
     onUpdateTempo(randomized);
     saveTempoToHistory(randomized, 'randomized');
-  };
+  }, [onUpdateTempo, saveTempoToHistory]);
 
-  const handleSave = () => {
+  const handleSave = useCallback(() => {
     triggerHaptic(15);
     saveTempoToHistory(tempo, 'user');
     onClose();
-  };
+  }, [tempo, saveTempoToHistory, onClose]);
 
-  const handleApplyHistoricalTempo = (historicalTempo: WorkoutSession['targetTempo']) => {
+  const handleApplyHistoricalTempo = useCallback((historicalTempo: WorkoutSession['targetTempo']) => {
     triggerHaptic(20);
     onUpdateTempo(historicalTempo);
-  };
+  }, [onUpdateTempo]);
 
-  const handleDeleteHistoryItem = (id: string) => {
+  const handleDeleteHistoryItem = useCallback((id: string) => {
     triggerHaptic(15);
     setSavedTempos(prev => {
       const updated = prev.filter(item => item.id !== id);
       localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
       return updated;
     });
-  };
+  }, []);
 
-  const handleClearHistory = () => {
+  const handleClearHistory = useCallback(() => {
     triggerHaptic(25);
-    const unpinnedCount = savedTempos.filter(item => !item.pinned).length;
-    let updated: SavedTempo[] = [];
-    if (unpinnedCount > 0) {
-      updated = savedTempos.filter(item => item.pinned);
-    } else {
-      updated = [];
-    }
-    setSavedTempos(updated);
-    localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-  };
+    setSavedTempos(prev => {
+      const unpinnedCount = prev.filter(item => !item.pinned).length;
+      const updated = unpinnedCount > 0 ? prev.filter(item => item.pinned) : [];
+      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
 
-  const adjustValue = (key: keyof WorkoutSession['targetTempo'], amount: number) => {
-    triggerHaptic(10); // Super short snappy tap for quick continuous adjustments
+  const adjustValue = useCallback((key: keyof WorkoutSession['targetTempo'], amount: number) => {
+    triggerHaptic(10);
     const minVal = (key === 'concentric' || key === 'eccentric') ? 0.5 : 0;
     const newValue = Math.max(minVal, tempo[key] + amount);
     onUpdateTempo({
       ...tempo,
       [key]: newValue
     });
-  };
-
-  const phases = [
-    { key: 'concentric' as const, label: 'LIFT', color: 'text-sleek-up' },
-    { key: 'pauseTop' as const, label: 'HOLD', color: 'text-sleek-muted' },
-    { key: 'eccentric' as const, label: 'LOWER', color: 'text-sleek-down' },
-    { key: 'pauseBottom' as const, label: 'PAUSE', color: 'text-sleek-muted' },
-  ];
+  }, [tempo, onUpdateTempo]);
 
   return (
       <AnimatePresence>
@@ -345,7 +347,7 @@ export default function TempoSettings({
                     className="p-6 sm:p-8 space-y-6 sm:space-y-8 overflow-y-auto min-h-0 custom-scrollbar focus:outline-none flex-1"
                   >
                     <div className="grid grid-cols-1 gap-6">
-                      {phases.map((phase) => (
+                      {SETTINGS_PHASES.map((phase) => (
                         <div key={phase.key} className="flex items-center justify-between">
                           <div>
                             <div className="text-[10px] font-bold text-sleek-muted uppercase tracking-widest mb-1">{phase.label}</div>
