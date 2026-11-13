@@ -31,6 +31,8 @@ import RotateDeviceOverlay from './RotateDeviceOverlay';
 const CONTROL_SOLID = 'bg-timer-surface border border-timer-surface-border text-white';
 const CONTROL_PRIMARY = 'bg-sleek-up border border-transparent text-black shadow-[0_0_30px_rgba(255,255,255,0.3)]';
 const CONTROL_SHAPE = 'flex items-center justify-center gap-2 sm:gap-3 px-5 sm:px-10 py-3 sm:py-4 font-bold text-sm sm:text-base transition-colors';
+/** Icon-only 1/4 button: no horizontal padding, or the icon gets squeezed at wider breakpoints. */
+const CONTROL_ICON = 'flex items-center justify-center gap-2 font-bold text-sm sm:text-base transition-colors';
 
 interface RepTimerProps {
   onRepComplete: (rep: Rep) => void;
@@ -330,7 +332,7 @@ export default function RepTimer({
                   {isCurrent ? (
                     <div
                       ref={timer.progressRef}
-                      className="absolute inset-y-0 left-0 w-full bg-sleek-up origin-left scale-x-0"
+                      className="progress-fill absolute inset-y-0 left-0 w-full bg-sleek-up"
                     />
                   ) : (
                     <div
@@ -575,7 +577,7 @@ export default function RepTimer({
                   whileTap={{ scale: 0.98 }}
                   onClick={requestStop}
                   aria-label={confirmStop ? 'Confirm end session' : 'End session'}
-                  className={cn('w-1/4 h-full', CONTROL_SHAPE, CONTROL_SOLID, confirmStop && 'text-red-300')}
+                  className={cn('w-1/4 h-full', CONTROL_ICON, CONTROL_SOLID, confirmStop && 'text-red-300')}
                 >
                   {confirmStop ? <span className="text-[11px] font-bold">END?</span> : <Square size={20} fill="currentColor" />}
                 </motion.button>
@@ -596,7 +598,7 @@ export default function RepTimer({
                   whileTap={{ scale: 0.98 }}
                   onClick={requestStop}
                   aria-label={confirmStop ? 'Confirm end session' : 'End session'}
-                  className={cn('w-1/4 h-full', CONTROL_SHAPE, CONTROL_SOLID, confirmStop && 'text-red-300')}
+                  className={cn('w-1/4 h-full', CONTROL_ICON, CONTROL_SOLID, confirmStop && 'text-red-300')}
                 >
                   {confirmStop ? <span className="text-[11px] font-bold">END?</span> : <Square size={20} fill="currentColor" />}
                 </motion.button>

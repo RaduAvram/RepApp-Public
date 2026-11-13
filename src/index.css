@@ -55,3 +55,14 @@
 .animate-hold-shake {
   animation: hold-shake 0.35s linear infinite;
 }
+
+/*
+ * The set-bar fill gets its transform written directly by the timer engine.
+ * This is only the initial hidden state; do not use Tailwind's scale-x-0 here,
+ * because v4 implements that with the `scale` property, which does not combine
+ * with the inline `transform`.
+ */
+.progress-fill {
+  transform: scaleX(0);
+  transform-origin: left;
+}
