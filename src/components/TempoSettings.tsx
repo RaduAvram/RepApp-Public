@@ -1,21 +1,36 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { ChevronUp, ChevronDown, ExternalLink, Dumbbell, Battery, BatteryCharging, History, Trash2, ArrowLeft, Pin } from 'lucide-react';
-import { WorkoutSession, FpsLimit, SavedTempo } from '../types';
-import { cn, triggerHaptic } from '../lib/utils';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  ArrowLeft,
+  Battery,
+  BatteryCharging,
+  ChevronDown,
+  ChevronUp,
+  Dumbbell,
+  ExternalLink,
+  History,
+  Pin,
+  Trash2
+} from 'lucide-react';
+import type { FpsLimit, SavedTempo, Tempo } from '../types';
+import { cn, newId, triggerHaptic } from '../lib/utils';
+import {
+  capHistory,
+  formatHistoryTimestamp,
+  loadHistory,
+  sameTempo,
+  saveHistory
+} from '../lib/storage';
+import { PHASES_ORDER, PHASE_META } from '../lib/phases';
 
-const SETTINGS_PHASES = [
-  { key: 'concentric' as const, label: 'LIFT', color: 'text-sleek-up' },
-  { key: 'pauseTop' as const, label: 'HOLD', color: 'text-sleek-muted' },
-  { key: 'eccentric' as const, label: 'LOWER', color: 'text-sleek-down' },
-  { key: 'pauseBottom' as const, label: 'PAUSE', color: 'text-sleek-muted' },
-] as const;
+const FPS_OPTIONS: readonly FpsLimit[] = [30, 60, 120];
 
 interface TempoSettingsProps {
   isOpen: boolean;
   onClose: () => void;
-  tempo: WorkoutSession['targetTempo'];
-  onUpdateTempo: (tempo: WorkoutSession['targetTempo']) => void;
+  tempo: Tempo;
+  onUpdateTempo: (tempo: Tempo) => void;
   seamlessTransitions: boolean;
   onToggleSeamless: () => void;
   fpsLimit: FpsLimit;
@@ -24,10 +39,10 @@ interface TempoSettingsProps {
   batteryLevel: number | null;
 }
 
-export default function TempoSettings({ 
-  isOpen, 
-  onClose, 
-  tempo, 
+export default function TempoSettings({
+  isOpen,
+  onClose,
+  tempo,
   onUpdateTempo,
   seamlessTransitions,
   onToggleSeamless,
@@ -35,474 +50,496 @@ export default function TempoSettings({
   onChangeFps,
   batteryCharging,
   batteryLevel
- }: TempoSettingsProps) {
+}: TempoSettingsProps) {
   const [showHistory, setShowHistory] = useState(false);
-  const [savedTempos, setSavedTempos] = useState<SavedTempo[]>(() => {
-    try {
-      const stored = localStorage.getItem('tempotrack_timings_history');
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [savedTempos, setSavedTempos] = useState<SavedTempo[]>(loadHistory);
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openedTempoRef = useRef<Tempo | null>(null);
+  const tempoRef = useRef(tempo);
+
+  // Keep the latest tempo available to the open/close handlers below.
+  useEffect(() => {
+    tempoRef.current = tempo;
   });
 
-  // Load history whenever dialog opens
+  // One effect owns history persistence; state updaters stay pure (A8).
   useEffect(() => {
-    if (isOpen) {
-      try {
-        const stored = localStorage.getItem('tempotrack_timings_history');
-        if (stored) {
-          setSavedTempos(JSON.parse(stored));
-        }
-      } catch (e) {
-        console.error('Failed to load history', e);
-      }
-    } else {
-      setShowHistory(false);
-    }
+    saveHistory(savedTempos);
+  }, [savedTempos]);
+
+  // Re-read history on open and remember the tempo the modal opened with.
+  useEffect(() => {
+    if (!isOpen) return;
+    setSavedTempos(loadHistory());
+    openedTempoRef.current = tempoRef.current;
+    setShowHistory(false);
+    setConfirmClear(false);
   }, [isOpen]);
 
-  const saveTempoToHistory = useCallback((newTempo: WorkoutSession['targetTempo'], source: 'randomized' | 'user') => {
-    setSavedTempos(prev => {
-      // Check if the most recent entry has the exact same tempo to avoid spam/redundancy
-      if (prev.length > 0) {
-        const last = prev[0].tempo;
-        if (
-          last.eccentric === newTempo.eccentric &&
-          last.pauseBottom === newTempo.pauseBottom &&
-          last.concentric === newTempo.concentric &&
-          last.pauseTop === newTempo.pauseTop
-        ) {
-          return prev;
-        }
-      }
+  useEffect(() => () => {
+    if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
+  }, []);
 
+  const addToHistory = useCallback((nextTempo: Tempo, source: SavedTempo['source']) => {
+    setSavedTempos((prev) => {
+      // Dedupe against the whole list, not just the newest entry (A17).
+      if (prev.some((item) => sameTempo(item.tempo, nextTempo))) return prev;
       const entry: SavedTempo = {
-        id: crypto.randomUUID(),
+        id: newId(),
         timestamp: Date.now(),
-        tempo: { ...newTempo },
+        tempo: { ...nextTempo },
         source
       };
-
-      const updated = [entry, ...prev].slice(0, 50); // Keep history to a reasonable limit
-      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-      return updated;
+      return capHistory([entry, ...prev]);
     });
   }, []);
 
-  const isCurrentTempo = useCallback((t: SavedTempo['tempo']) => {
-    return tempo.concentric === t.concentric &&
-           tempo.pauseTop === t.pauseTop &&
-           tempo.eccentric === t.eccentric &&
-           tempo.pauseBottom === t.pauseBottom;
-  }, [tempo]);
+  const handleDone = useCallback(() => {
+    triggerHaptic(15);
+    const opened = openedTempoRef.current;
+    const currentTempo = tempoRef.current;
+    // Only record a new entry when the tempo changed while the modal was open.
+    if (!opened || !sameTempo(currentTempo, opened)) {
+      addToHistory(currentTempo, 'user');
+    }
+    onClose();
+  }, [addToHistory, onClose]);
 
-  const isCurrentlyPinned = savedTempos.some(item => isCurrentTempo(item.tempo) && item.pinned);
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') handleDone();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleDone, isOpen]);
+
+  const isCurrentTempo = useCallback((candidate: Tempo) => sameTempo(tempo, candidate), [tempo]);
+  const isCurrentlyPinned = savedTempos.some((item) => isCurrentTempo(item.tempo) && item.pinned);
 
   const handlePinCurrent = useCallback(() => {
     triggerHaptic(20);
-    setSavedTempos(prev => {
-      const existingIdx = prev.findIndex(item => 
-        tempo.concentric === item.tempo.concentric &&
-        tempo.pauseTop === item.tempo.pauseTop &&
-        tempo.eccentric === item.tempo.eccentric &&
-        tempo.pauseBottom === item.tempo.pauseBottom
-      );
-      let updated: SavedTempo[];
-      if (existingIdx !== -1) {
-        updated = prev.map((item, idx) => 
-          idx === existingIdx ? { ...item, pinned: !item.pinned } : item
-        );
-      } else {
-        const entry: SavedTempo = {
-          id: crypto.randomUUID(),
-          timestamp: Date.now(),
-          tempo: { ...tempo },
-          source: 'user',
-          pinned: true
-        };
-        updated = [entry, ...prev];
+    setSavedTempos((prev) => {
+      const existingIndex = prev.findIndex((item) => sameTempo(item.tempo, tempo));
+      if (existingIndex !== -1) {
+        return prev.map((item, index) => (
+          index === existingIndex ? { ...item, pinned: !item.pinned } : item
+        ));
       }
-      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-      return updated;
+      const entry: SavedTempo = {
+        id: newId(),
+        timestamp: Date.now(),
+        tempo: { ...tempo },
+        source: 'user',
+        pinned: true
+      };
+      return capHistory([entry, ...prev]);
     });
   }, [tempo]);
 
-  const handleTogglePin = useCallback((id: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Avoid triggering apply tempo
+  const handleTogglePin = useCallback((id: string, event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
     triggerHaptic(15);
-    setSavedTempos(prev => {
-      const updated = prev.map(item => 
-        item.id === id ? { ...item, pinned: !item.pinned } : item
-      );
-      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-      return updated;
-    });
+    setSavedTempos((prev) => prev.map((item) => (
+      item.id === id ? { ...item, pinned: !item.pinned } : item
+    )));
   }, []);
 
-  const sortedSavedTempos = useMemo(() => {
-    return [...savedTempos].sort((a, b) => {
+  const handleDeleteHistoryItem = useCallback((id: string) => {
+    triggerHaptic(15);
+    setSavedTempos((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const handleClearHistory = useCallback(() => {
+    triggerHaptic(15);
+    if (!confirmClear) {
+      setConfirmClear(true);
+      if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = setTimeout(() => setConfirmClear(false), 3000);
+      return;
+    }
+
+    if (clearTimerRef.current !== null) clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = null;
+    setConfirmClear(false);
+    triggerHaptic(25);
+    setSavedTempos((prev) => {
+      const hasUnpinned = prev.some((item) => !item.pinned);
+      return hasUnpinned ? prev.filter((item) => item.pinned) : [];
+    });
+  }, [confirmClear]);
+
+  const sortedSavedTempos = useMemo(() => (
+    [...savedTempos].sort((a, b) => {
       if (a.pinned && !b.pinned) return -1;
       if (!a.pinned && b.pinned) return 1;
       return b.timestamp - a.timestamp;
-    });
-  }, [savedTempos]);
+    })
+  ), [savedTempos]);
 
   const handleRandomize = useCallback(() => {
-    triggerHaptic(25); // Slightly heavier rumble for randomized generation
-    const randomized = {
+    triggerHaptic(25);
+    const randomized: Tempo = {
       concentric: Math.floor(Math.random() * 5) + 1,
       pauseTop: Math.floor(Math.random() * 3),
       eccentric: Math.floor(Math.random() * 5) + 1,
-      pauseBottom: Math.floor(Math.random() * 3),
+      pauseBottom: Math.floor(Math.random() * 3)
     };
     onUpdateTempo(randomized);
-    saveTempoToHistory(randomized, 'randomized');
-  }, [onUpdateTempo, saveTempoToHistory]);
+    addToHistory(randomized, 'randomized');
+  }, [addToHistory, onUpdateTempo]);
 
-  const handleSave = useCallback(() => {
-    triggerHaptic(15);
-    saveTempoToHistory(tempo, 'user');
-    onClose();
-  }, [tempo, saveTempoToHistory, onClose]);
-
-  const handleApplyHistoricalTempo = useCallback((historicalTempo: WorkoutSession['targetTempo']) => {
+  const handleApplyHistoricalTempo = useCallback((historicalTempo: Tempo) => {
     triggerHaptic(20);
     onUpdateTempo(historicalTempo);
   }, [onUpdateTempo]);
 
-  const handleDeleteHistoryItem = useCallback((id: string) => {
-    triggerHaptic(15);
-    setSavedTempos(prev => {
-      const updated = prev.filter(item => item.id !== id);
-      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
-
-  const handleClearHistory = useCallback(() => {
-    triggerHaptic(25);
-    setSavedTempos(prev => {
-      const unpinnedCount = prev.filter(item => !item.pinned).length;
-      const updated = unpinnedCount > 0 ? prev.filter(item => item.pinned) : [];
-      localStorage.setItem('tempotrack_timings_history', JSON.stringify(updated));
-      return updated;
-    });
-  }, []);
-
-  const adjustValue = useCallback((key: keyof WorkoutSession['targetTempo'], amount: number) => {
+  const adjustValue = useCallback((key: keyof Tempo, amount: number) => {
     triggerHaptic(10);
-    const minVal = (key === 'concentric' || key === 'eccentric') ? 0.5 : 0;
-    const newValue = Math.max(minVal, tempo[key] + amount);
+    const minValue = key === 'concentric' || key === 'eccentric' ? 0.5 : 0;
     onUpdateTempo({
       ...tempo,
-      [key]: newValue
+      [key]: Math.max(minValue, tempo[key] + amount)
     });
-  }, [tempo, onUpdateTempo]);
+  }, [onUpdateTempo, tempo]);
 
   return (
-      <AnimatePresence>
-        {isOpen && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            {/* Backdrop */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-              className="absolute inset-0 bg-sleek-bg/85 backdrop-blur-md"
-              onClick={onClose}
-            />
-            
-            {/* Modal */}
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              transition={{ type: "spring", stiffness: 350, damping: 30, mass: 0.8 }}
-              className="relative bg-sleek-card border border-sleek-border w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl will-change-transform"
-            >
-              {showHistory ? (
-                /* History Header */
-                <div className="p-6 border-b border-sleek-border flex items-center justify-between bg-sleek-muted/5 shrink-0">
-                  <div className="flex items-center gap-2.5">
-                    <button
-                      onClick={() => { triggerHaptic(15); setShowHistory(false); }}
-                      className="p-1 -ml-1 hover:bg-sleek-muted/10 text-sleek-muted hover:text-sleek-text transition-colors"
-                      aria-label="Back to configure"
-                    >
-                      <ArrowLeft size={16} />
-                    </button>
-                    <h2 className="text-sm font-bold text-sleek-text uppercase tracking-widest">Timings History</h2>
-                  </div>
-                  {savedTempos.length > 0 && (
-                    <button 
-                      onClick={handleClearHistory}
-                      className="text-[10px] font-bold text-red-400 hover:text-red-300 transition-colors uppercase tracking-widest flex items-center gap-1 cursor-pointer"
-                    >
-                      <Trash2 size={12} /> {savedTempos.some(item => !item.pinned) ? "Clear Unpinned" : "Clear All"}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                /* Standard Header */
-                <div className="p-6 border-b border-sleek-border flex items-center justify-between bg-sleek-muted/5 shrink-0">
-                  <h2 className="text-sm font-bold text-sleek-text uppercase tracking-widest">Configure</h2>
-                  <button 
-                    onClick={handleSave}
-                    className="text-xs font-bold text-sleek-muted hover:text-sleek-up transition-colors uppercase tracking-widest px-2 py-1 cursor-pointer"
-                  >
-                    Save
-                  </button>
-                </div>
-              )}
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute inset-0 bg-sleek-bg/90"
+            onClick={handleDone}
+          />
 
-              <AnimatePresence mode="wait">
-                {showHistory ? (
-                  /* History View Body */
-                  <motion.div 
-                    key="history"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    transition={{ duration: 0.2 }}
-                    className="p-6 sm:p-8 space-y-4 overflow-y-auto min-h-0 custom-scrollbar flex-1 focus:outline-none"
+          {/* Modal */}
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Configure timings"
+            initial={{ opacity: 0, scale: 0.9, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 10 }}
+            transition={{ type: 'spring', stiffness: 350, damping: 30, mass: 0.8 }}
+            className="relative bg-sleek-card border border-sleek-border w-full max-w-md max-h-[90vh] flex flex-col shadow-2xl will-change-transform"
+          >
+            {showHistory ? (
+              /* History Header */
+              <div className="p-5 border-b border-sleek-border flex items-center justify-between bg-sleek-muted/5 shrink-0">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => { triggerHaptic(15); setShowHistory(false); setConfirmClear(false); }}
+                    className="p-2 -ml-2 hover:bg-sleek-muted/10 text-sleek-muted hover:text-sleek-text transition-colors"
+                    aria-label="Back to configure"
                   >
-                    {sortedSavedTempos.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-16 text-center text-sleek-muted/50">
-                        <History size={32} className="opacity-20 mb-3" />
-                        <p className="text-xs font-bold uppercase tracking-wider">No history recorded yet</p>
-                        <p className="text-[10px] lowercase italic mt-1 max-w-[200px]">
-                          randomized or custom saved timings will show up here
-                        </p>
+                    <ArrowLeft size={16} />
+                  </button>
+                  <h2 className="text-sm font-bold text-sleek-text uppercase tracking-widest whitespace-nowrap">Timings History</h2>
+                </div>
+                {savedTempos.length > 0 && (
+                  <button
+                    onClick={handleClearHistory}
+                    className={cn(
+                      'text-[11px] font-bold transition-colors uppercase tracking-widest flex items-center gap-1 cursor-pointer',
+                      confirmClear ? 'text-red-300' : 'text-red-400 hover:text-red-300'
+                    )}
+                  >
+                    <Trash2 size={12} />
+                    {confirmClear
+                      ? 'CLEAR?'
+                      : savedTempos.some((item) => !item.pinned) ? 'Clear Unpinned' : 'Clear All'}
+                  </button>
+                )}
+              </div>
+            ) : (
+              /* Standard Header */
+              <div className="p-6 border-b border-sleek-border flex items-center justify-between bg-sleek-muted/5 shrink-0">
+                <h2 className="text-sm font-bold text-sleek-text uppercase tracking-widest">Configure</h2>
+                <button
+                  onClick={handleDone}
+                  className="text-xs font-bold text-sleek-muted hover:text-sleek-up transition-colors uppercase tracking-widest px-2 py-1 cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+
+            <AnimatePresence mode="wait">
+              {showHistory ? (
+                /* History View Body */
+                <motion.div
+                  key="history"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  transition={{ duration: 0.2 }}
+                  className="p-6 sm:p-8 space-y-4 overflow-y-auto h-[min(620px,70vh)] focus:outline-none"
+                >
+                  {sortedSavedTempos.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center text-sleek-muted/50">
+                      <History size={32} className="opacity-20 mb-3" />
+                      <p className="text-xs font-bold uppercase tracking-wider">No history recorded yet</p>
+                      <p className="text-[11px] lowercase italic mt-1 max-w-[220px]">
+                        randomized or custom saved timings will show up here
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-center gap-2 text-[11px] font-bold uppercase tracking-widest">
+                        {PHASES_ORDER.map((phase, index) => (
+                          <Fragment key={phase}>
+                            {index > 0 && <span className="text-sleek-muted/30">·</span>}
+                            <span style={{ color: PHASE_META[phase].color }}>{PHASE_META[phase].label}</span>
+                          </Fragment>
+                        ))}
                       </div>
-                    ) : (
+
                       <div className="space-y-2">
                         {sortedSavedTempos.map((item) => {
                           const isCurrent = isCurrentTempo(item.tempo);
                           return (
-                            <div 
+                            <div
                               key={item.id}
                               className={cn(
-                                "flex items-center justify-between p-3.5 bg-sleek-bg hover:border-sleek-up transition-all group relative",
-                                isCurrent ? "border-[3px] border-sleek-up bg-sleek-up/5" : "border border-sleek-border"
+                                'flex items-center justify-between p-3.5 bg-sleek-bg border transition-colors relative',
+                                isCurrent ? 'border-sleek-up bg-sleek-up/5' : 'border-sleek-border'
                               )}
                             >
                               <button
                                 onClick={() => handleApplyHistoricalTempo(item.tempo)}
                                 className="flex-1 text-left focus:outline-none cursor-pointer pr-2"
                               >
-                                <div className="text-sm font-mono font-bold text-white flex items-center gap-1.5 mb-1 whitespace-nowrap overflow-x-auto custom-scrollbar">
-                                  <span className="text-white">{item.tempo.concentric}s</span>
-                                  <span className="text-white/20">•</span>
-                                  <span className="text-sleek-muted">{item.tempo.pauseTop}s</span>
-                                  <span className="text-white/20">•</span>
-                                  <span className="text-white">{item.tempo.eccentric}s</span>
-                                  <span className="text-white/20">•</span>
-                                  <span className="text-sleek-muted">{item.tempo.pauseBottom}s</span>
+                                <div className="text-sm font-mono font-bold text-white flex items-center gap-1.5 mb-1 whitespace-nowrap">
+                                  {PHASES_ORDER.map((phase, index) => (
+                                    <Fragment key={phase}>
+                                      {index > 0 && <span className="text-white/20">•</span>}
+                                      <span className={cn(
+                                        phase === 'pause_top' || phase === 'pause_bottom'
+                                          ? 'text-sleek-muted'
+                                          : 'text-white'
+                                      )}>
+                                        {item.tempo[PHASE_META[phase].tempoKey]}s
+                                      </span>
+                                    </Fragment>
+                                  ))}
                                 </div>
-                                <div className="flex items-center gap-2 text-[9px] text-sleek-muted/60 font-semibold tracking-wider uppercase">
+                                <div className="flex items-center gap-1.5 text-[11px] text-sleek-muted/60 font-semibold tracking-normal uppercase whitespace-nowrap">
                                   <span>{item.source === 'randomized' ? 'Random Gen' : 'Custom Config'}</span>
                                   <span>•</span>
-                                  <span>{new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                                  <span>{formatHistoryTimestamp(item.timestamp)}</span>
                                 </div>
                               </button>
 
-                              <div className="flex items-center gap-1 shrink-0">
+                              <div className="flex items-center gap-0.5 shrink-0">
                                 <button
-                                  onClick={(e) => handleTogglePin(item.id, e)}
+                                  onClick={(event) => handleTogglePin(item.id, event)}
+                                  aria-label={item.pinned ? 'Unpin timing' : 'Pin timing'}
+                                  aria-pressed={Boolean(item.pinned)}
                                   className={cn(
-                                    "p-2 transition-all cursor-pointer",
-                                    item.pinned 
-                                      ? "text-sleek-up" 
-                                      : "text-sleek-muted/30 hover:text-sleek-muted group-hover:opacity-100 transition-opacity"
+                                    'h-10 w-10 flex items-center justify-center transition-colors cursor-pointer',
+                                    item.pinned
+                                      ? 'text-sleek-up'
+                                      : 'text-sleek-muted/50 hover:text-sleek-text'
                                   )}
-                                  title={item.pinned ? "Unpin timing" : "Pin timing"}
                                 >
-                                  <Pin size={13} className={item.pinned ? "fill-current" : ""} />
+                                  <Pin size={15} className={item.pinned ? 'fill-current' : ''} />
                                 </button>
 
                                 <button
                                   onClick={() => handleDeleteHistoryItem(item.id)}
-                                  className="p-2 text-sleek-muted hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100 cursor-pointer"
                                   aria-label="Delete entry"
+                                  className="h-10 w-10 flex items-center justify-center text-sleek-muted/60 hover:text-red-400 transition-colors cursor-pointer"
                                 >
-                                  <Trash2 size={13} />
+                                  <Trash2 size={15} />
                                 </button>
                               </div>
                             </div>
                           );
                         })}
                       </div>
-                    )}
-                  </motion.div>
-                ) : (
-                  /* Standard Configure View Body */
-                  <motion.div 
-                    key="config"
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    transition={{ duration: 0.2 }}
-                    className="p-6 sm:p-8 space-y-6 sm:space-y-8 overflow-y-auto min-h-0 custom-scrollbar focus:outline-none flex-1"
-                  >
-                    <div className="grid grid-cols-1 gap-6">
-                      {SETTINGS_PHASES.map((phase) => (
-                        <div key={phase.key} className="flex items-center justify-between">
+                    </>
+                  )}
+                </motion.div>
+              ) : (
+                /* Standard Configure View Body */
+                <motion.div
+                  key="config"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 20 }}
+                  transition={{ duration: 0.2 }}
+                  className="p-6 sm:p-8 space-y-6 sm:space-y-8 overflow-y-auto h-[min(620px,70vh)] focus:outline-none"
+                >
+                  <div className="grid grid-cols-1 gap-6">
+                    {PHASES_ORDER.map((phase) => {
+                      const meta = PHASE_META[phase];
+                      return (
+                        <div key={phase} className="flex items-center justify-between">
                           <div>
-                            <div className="text-[10px] font-bold text-sleek-muted uppercase tracking-widest mb-1">{phase.label}</div>
-                            <div className={cn("text-2xl font-bold tabular-nums", phase.color)}>
-                              {tempo[phase.key].toFixed(1)}s
+                            <div className="text-[11px] font-bold text-sleek-muted uppercase tracking-widest mb-1">
+                              {meta.label}
+                            </div>
+                            <div className={cn('text-2xl font-bold tabular-nums', meta.textClass)}>
+                              {tempo[meta.tempoKey].toFixed(1)}s
                             </div>
                           </div>
-                          
-                          <div className="flex items-center gap-2 bg-sleek-bg p-1 border border-sleek-border">
-                            <button 
-                              onClick={() => adjustValue(phase.key, -0.5)}
-                              className="p-2 hover:bg-sleek-muted/10 text-sleek-muted transition-colors active:scale-90"
+
+                          <div className="flex items-center gap-1 bg-sleek-bg p-1 border border-sleek-border">
+                            <button
+                              onClick={() => adjustValue(meta.tempoKey, -0.5)}
+                              aria-label={`Decrease ${meta.label} duration`}
+                              className="h-11 w-11 flex items-center justify-center hover:bg-sleek-muted/10 text-sleek-muted transition-colors active:scale-90"
                             >
                               <ChevronDown size={20} />
                             </button>
                             <div className="w-px h-6 bg-sleek-border" />
-                            <button 
-                              onClick={() => adjustValue(phase.key, 0.5)}
-                              className="p-2 hover:bg-sleek-muted/10 text-sleek-muted transition-colors active:scale-90"
+                            <button
+                              onClick={() => adjustValue(meta.tempoKey, 0.5)}
+                              aria-label={`Increase ${meta.label} duration`}
+                              className="h-11 w-11 flex items-center justify-center hover:bg-sleek-muted/10 text-sleek-muted transition-colors active:scale-90"
                             >
                               <ChevronUp size={20} />
                             </button>
                           </div>
                         </div>
-                      ))}
-                    </div>
+                      );
+                    })}
+                  </div>
 
-                    <div className="space-y-3 pt-2">
-                      <a 
-                        href="https://musclewiki.com" 
-                        target="_blank" 
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1.5 text-[10px] text-sleek-muted hover:text-sleek-up transition-colors w-fit font-semibold"
-                      >
-                        Explore anatomy on MuscleWiki <ExternalLink size={10} />
-                      </a>
-
-                      <button
-                        onClick={handleRandomize}
-                        className="flex items-center gap-2 px-4 py-3 border border-sleek-border bg-sleek-bg text-sleek-muted text-xs font-bold transition-all w-full justify-center hover:border-sleek-up hover:text-sleek-text active:scale-[0.98] cursor-pointer"
-                      >
-                        <Dumbbell size={16} />
-                        <span>Randomize Timings</span>
-                      </button>
-
-                      <button
-                        onClick={handlePinCurrent}
-                        className={cn(
-                          "flex items-center gap-2 px-4 py-3 border text-xs font-bold transition-all w-full justify-center active:scale-[0.98] cursor-pointer",
-                          isCurrentlyPinned
-                            ? "border-sleek-up bg-sleek-up/5 text-sleek-up hover:bg-sleek-up/10"
-                            : "border-sleek-border bg-sleek-bg text-sleek-muted hover:border-sleek-up hover:text-sleek-text"
-                        )}
-                      >
-                        <Pin size={16} className={isCurrentlyPinned ? "fill-current" : ""} />
-                        <span>{isCurrentlyPinned ? "Unpin Selected Timings" : "Pin Current Timing"}</span>
-                      </button>
-
-                      <button
-                        onClick={() => { triggerHaptic(15); setShowHistory(true); }}
-                        className="flex items-center gap-2 px-4 py-3 border border-sleek-border bg-sleek-bg text-sleek-muted text-xs font-bold transition-all w-full justify-center hover:border-sleek-up hover:text-sleek-text active:scale-[0.98] cursor-pointer"
-                      >
-                        <History size={16} />
-                        <span>Timings History</span>
-                      </button>
-                    </div>
-
-                    <div className="pt-4 border-t border-sleek-border space-y-4">
-                      <div className="text-sm font-bold text-sleek-text uppercase tracking-widest text-center">
-                        Advanced
-                      </div>
-                      <button 
-                        onClick={() => { triggerHaptic(15); onToggleSeamless(); }}
-                        className="flex items-center justify-between w-full p-4 bg-sleek-bg border border-sleek-border group transition-all hover:border-sleek-up/30"
-                      >
-                        <div className="text-left">
-                          <div className="text-[10px] font-bold text-sleek-muted uppercase tracking-widest mb-1">Background Experience</div>
-                          <div className="text-sm font-bold text-sleek-text">Seamless Transitions</div>
-                        </div>
-                        <div className={cn(
-                          "w-12 h-6 relative transition-colors duration-300",
-                          seamlessTransitions ? "bg-sleek-up" : "bg-sleek-muted/20"
-                        )}>
-                          <motion.div 
-                            initial={false}
-                            animate={{ x: seamlessTransitions ? 24 : 0 }}
-                            transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                            className={cn(
-                              "absolute top-1 left-1 w-4 h-4",
-                              seamlessTransitions ? "bg-black" : "bg-white"
-                            )} 
-                            style={{ contentVisibility: 'auto' }}
-                          />
-                        </div>
-                      </button>
-
-                      <div className="p-4 bg-sleek-bg border border-sleek-border space-y-3">
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <div className="text-[10px] font-bold text-sleek-muted uppercase tracking-widest mb-1">
-                              Performance Settings {batteryLevel !== null ? `(${Math.round(batteryLevel * 100)}% power)` : ''}
-                            </div>
-                            <div className="text-sm font-bold text-sleek-text">
-                              Framerate Limit
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            {batteryCharging ? (
-                              <span className="text-[10px] font-bold text-green-400 uppercase tracking-widest flex items-center gap-1">
-                                <BatteryCharging size={12} className="animate-pulse" /> Charging
-                              </span>
-                            ) : batteryLevel !== null && batteryLevel <= 0.25 ? (
-                              <span className="text-[10px] font-bold text-[#f87171] uppercase tracking-widest flex items-center gap-1 animate-pulse">
-                                <Battery size={12} /> Battery Low
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                        <div className="grid grid-cols-4 gap-1 bg-sleek-muted/5 p-1 border border-sleek-border/30">
-                          {([25, 40, 60, 120] as const).map((fps) => (
-                            <button
-                              key={fps}
-                              onClick={() => {
-                                triggerHaptic(15);
-                                onChangeFps(fps);
-                              }}
-                              className={cn(
-                                "py-2 text-xs font-bold uppercase transition-all tracking-wider text-center cursor-pointer",
-                                fpsLimit === fps
-                                  ? "bg-sleek-up text-black font-extrabold shadow-sm"
-                                  : "text-sleek-muted hover:text-sleek-text hover:bg-sleek-muted/5"
-                              )}
-                            >
-                              {fps}
-                            </button>
-                          ))}
-                        </div>
-                        <div className="text-[9px] text-sleek-muted/70 italic tracking-wide">
-                          Timer tick updates at {fpsLimit}FPS. Custom CSS transitions maintain full smoothness across device screen sizes.
-                        </div>
-                      </div>
-                    </div>
+                  <div className="space-y-3 pt-2">
+                    <a
+                      href="https://musclewiki.com"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 text-[11px] text-sleek-muted hover:text-sleek-up transition-colors w-fit font-semibold"
+                    >
+                      Explore anatomy on MuscleWiki <ExternalLink size={10} />
+                    </a>
 
                     <button
-                      onClick={handleSave}
-                      className="w-full bg-sleek-up text-black py-4 font-bold tracking-widest uppercase text-sm hover:bg-sleek-up/90 transition-all active:scale-[0.99] shadow-[0_0_20px_rgba(255,255,255,0.2)]"
+                      onClick={handleRandomize}
+                      className="flex items-center gap-2 px-4 py-3 border border-sleek-border bg-sleek-bg text-sleek-muted text-xs font-bold transition-all w-full justify-center hover:border-sleek-up hover:text-sleek-text active:scale-[0.98] cursor-pointer"
                     >
-                      Save Configuration
+                      <Dumbbell size={16} />
+                      <span>Randomize Timings</span>
                     </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+
+                    <button
+                      onClick={handlePinCurrent}
+                      aria-pressed={isCurrentlyPinned}
+                      className={cn(
+                        'flex items-center gap-2 px-4 py-3 border text-xs font-bold transition-all w-full justify-center active:scale-[0.98] cursor-pointer',
+                        isCurrentlyPinned
+                          ? 'border-sleek-up bg-sleek-up/5 text-sleek-up hover:bg-sleek-up/10'
+                          : 'border-sleek-border bg-sleek-bg text-sleek-muted hover:border-sleek-up hover:text-sleek-text'
+                      )}
+                    >
+                      <Pin size={16} className={isCurrentlyPinned ? 'fill-current' : ''} />
+                      <span>{isCurrentlyPinned ? 'Unpin Selected Timings' : 'Pin Current Timing'}</span>
+                    </button>
+
+                    <button
+                      onClick={() => { triggerHaptic(15); setShowHistory(true); }}
+                      className="flex items-center gap-2 px-4 py-3 border border-sleek-border bg-sleek-bg text-sleek-muted text-xs font-bold transition-all w-full justify-center hover:border-sleek-up hover:text-sleek-text active:scale-[0.98] cursor-pointer"
+                    >
+                      <History size={16} />
+                      <span>Timings History</span>
+                    </button>
+                  </div>
+
+                  <div className="pt-4 border-t border-sleek-border space-y-4">
+                    <div className="text-sm font-bold text-sleek-text uppercase tracking-widest text-center">
+                      Advanced
+                    </div>
+                    <button
+                      onClick={() => { triggerHaptic(15); onToggleSeamless(); }}
+                      aria-pressed={seamlessTransitions}
+                      className="flex items-center justify-between w-full p-4 bg-sleek-bg border border-sleek-border group transition-all hover:border-sleek-up/30"
+                    >
+                      <div className="text-left">
+                        <div className="text-[11px] font-bold text-sleek-muted uppercase tracking-widest mb-1">
+                          Background Experience
+                        </div>
+                        <div className="text-sm font-bold text-sleek-text">Seamless Transitions</div>
+                      </div>
+                      <div className={cn(
+                        'w-12 h-6 relative transition-colors duration-300',
+                        seamlessTransitions ? 'bg-sleek-up' : 'bg-sleek-muted/20'
+                      )}>
+                        <motion.div
+                          initial={false}
+                          animate={{ x: seamlessTransitions ? 24 : 0 }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                          className={cn(
+                            'absolute top-1 left-1 w-4 h-4',
+                            seamlessTransitions ? 'bg-black' : 'bg-white'
+                          )}
+                        />
+                      </div>
+                    </button>
+
+                    <div className="p-4 bg-sleek-bg border border-sleek-border space-y-3">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <div className="text-[11px] font-bold text-sleek-muted uppercase tracking-widest mb-1">
+                            Performance Settings {batteryLevel !== null ? `(${Math.round(batteryLevel * 100)}% power)` : ''}
+                          </div>
+                          <div className="text-sm font-bold text-sleek-text">Framerate Limit</div>
+                        </div>
+                        <div className="text-right">
+                          {batteryCharging ? (
+                            <span className="text-[11px] font-bold text-green-400 uppercase tracking-widest flex items-center gap-1">
+                              <BatteryCharging size={12} className="animate-pulse" /> Charging
+                            </span>
+                          ) : batteryLevel !== null && batteryLevel <= 0.25 ? (
+                            <span className="text-[11px] font-bold text-[#f87171] uppercase tracking-widest flex items-center gap-1 animate-pulse">
+                              <Battery size={12} /> Battery Low
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1 bg-sleek-muted/5 p-1 border border-sleek-border/30">
+                        {FPS_OPTIONS.map((fps) => (
+                          <button
+                            key={fps}
+                            onClick={() => onChangeFps(fps)}
+                            aria-pressed={fpsLimit === fps}
+                            className={cn(
+                              'py-3 text-xs font-bold uppercase transition-all tracking-wider text-center cursor-pointer',
+                              fpsLimit === fps
+                                ? 'bg-sleek-up text-black font-extrabold shadow-sm'
+                                : 'text-sleek-muted hover:text-sleek-text hover:bg-sleek-muted/5'
+                            )}
+                          >
+                            {fps}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="text-[11px] text-sleek-muted/70 italic tracking-wide">
+                        The ring redraws at {fpsLimit} FPS. Every option divides 60 Hz and 120 Hz
+                        refresh rates evenly, so pacing stays smooth.
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleDone}
+                    className="w-full bg-sleek-up text-black py-4 font-bold tracking-widest uppercase text-sm hover:bg-sleek-up/90 transition-all active:scale-[0.99] shadow-[0_0_20px_rgba(255,255,255,0.2)]"
+                  >
+                    Done
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }

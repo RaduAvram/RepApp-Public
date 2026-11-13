@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 @import "tailwindcss";
 
 @theme {
@@ -11,5 +10,48 @@
   --color-sleek-text: #FFFFFF;
   --color-sleek-muted: #b0b8bf;
   --color-sleek-border: #495054;
+
+  /* Repeated inline colours, lifted into tokens. */
+  --color-timer-surface: #1d1d1d;
+  --color-timer-surface-border: #38393a;
+  --color-timer-idle-surface: #252729;
+  --color-timer-base: #171717;
 }
 
+@keyframes bounce-three {
+  0%, 100% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+  50% {
+    transform: translateY(25%);
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+.animate-bounce-three {
+  animation: bounce-three 1s 3;
+}
+
+/* Runs on the compositor, so the HOLD shake stays smooth at 30 FPS. */
+@keyframes hold-shake {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  20% {
+    transform: translate3d(1px, 1px, 0);
+  }
+  40% {
+    transform: translate3d(-1px, 0.6px, 0);
+  }
+  60% {
+    transform: translate3d(0.8px, -1px, 0);
+  }
+  80% {
+    transform: translate3d(-0.8px, 0.8px, 0);
+  }
+}
+
+.animate-hold-shake {
+  animation: hold-shake 0.35s linear infinite;
+}

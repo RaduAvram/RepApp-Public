@@ -1,11 +1,8 @@
 {
   "name": "TempoTrack",
-  "description": "A workout rep timer that tracks concentric and eccentric phases with detailed performance analytics and AI-powered tempo coaching.",
+  "description": "A workout rep timer that tracks concentric and eccentric phases.",
   "requestFramePermissions": [
     "screen-wake-lock",
     "wake-lock"
-  ],
-  "majorCapabilities": [
-    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

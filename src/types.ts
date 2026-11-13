@@ -1,16 +1,20 @@
 export type Phase = 'eccentric' | 'concentric' | 'pause_top' | 'pause_bottom';
 
-export type FpsLimit = 25 | 40 | 60 | 120;
+export interface Tempo {
+  eccentric: number;
+  pauseBottom: number;
+  concentric: number;
+  pauseTop: number;
+}
+
+export type FpsLimit = 30 | 60 | 120;
+
+export type TimerStatus = 'idle' | 'countdown' | 'running' | 'paused' | 'setBreak' | 'finished';
 
 export interface SavedTempo {
   id: string;
   timestamp: number;
-  tempo: {
-    eccentric: number;
-    pauseBottom: number;
-    concentric: number;
-    pauseTop: number;
-  };
+  tempo: Tempo;
   source: 'randomized' | 'user';
   pinned?: boolean;
 }
@@ -27,14 +31,15 @@ export interface Rep {
 
 export interface WorkoutSession {
   id: string;
-  exerciseName: string;
-  startTime: number;
-  endTime?: number;
   reps: Rep[];
-  targetTempo: {
-    eccentric: number;
-    pauseBottom: number;
-    concentric: number;
-    pauseTop: number;
-  };
+  targetTempo: Tempo;
+}
+
+export interface Settings {
+  reps: number;
+  sets: number;
+  tempo: Tempo;
+  seamlessTransitions: boolean;
+  fpsLimit: FpsLimit;
+  sound: boolean;
 }

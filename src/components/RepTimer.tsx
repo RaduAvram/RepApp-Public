@@ -1,740 +1,635 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Play, Pause, Square, CheckCircle2, Maximize, Minimize } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  Maximize,
+  Minimize,
+  Pause,
+  Play,
+  Square,
+  Volume2,
+  VolumeX
+} from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { Phase, Rep, WorkoutSession, FpsLimit } from '../types';
+import type { FpsLimit, Phase, Rep, Tempo } from '../types';
+import {
+  PHASE_META,
+  RING_LENGTH,
+  RING_RADIUS,
+  THEMES,
+  THEME_KEYS,
+  repDuration
+} from '../lib/phases';
+import type { ThemeKey } from '../lib/phases';
 import { cn, triggerHaptic } from '../lib/utils';
+import { cueForPhase, playCue, primeAudio } from '../lib/audio';
+import { usePhaseTimer } from '../hooks/usePhaseTimer';
+import { useWakeLock } from '../hooks/useWakeLock';
+import { useFullscreen } from '../hooks/useFullscreen';
+import { useIdleControls } from '../hooks/useIdleControls';
+import RotateDeviceOverlay from './RotateDeviceOverlay';
 
-const PHASE_LABELS: Record<Phase, string> = {
-  eccentric: 'LOWER',
-  pause_bottom: 'PAUSE',
-  concentric: 'LIFT',
-  pause_top: 'HOLD'
-};
-
-const PHASES_ORDER: readonly Phase[] = ['concentric', 'pause_top', 'eccentric', 'pause_bottom'];
-
-const easeInOutCubic = (t: number) => 
-  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-const RING_THEMES = {
-  finished: { offset: 0, color: "#22c55e", bgStart: "#22c55e", bgEnd: "#10b981" },
-  countdown: { offset: 1244, color: "#fb923c", bgStart: "#fb923c", bgEnd: "#f97316" },
-  idle: { offset: 1244, color: "var(--color-sleek-muted)", bgStart: "#262626", bgEnd: "#171717" },
-  concentric: { color: "#fb923c", bgStart: "#fb923c", bgEnd: "#f97316" },
-  pause_top: { color: "#ef4444", bgStart: "#ef4444", bgEnd: "#e11d48" },
-  eccentric: { color: "#eab308", bgStart: "#eab308", bgEnd: "#d97706" },
-  pause_bottom: { offset: 1244, color: "#22c55e", bgStart: "#22c55e", bgEnd: "#10b981" }
-};
+const CONTROL_SOLID = 'bg-timer-surface border border-timer-surface-border text-white';
+const CONTROL_PRIMARY = 'bg-sleek-up border border-transparent text-black shadow-[0_0_30px_rgba(255,255,255,0.3)]';
+const CONTROL_SHAPE = 'flex items-center justify-center gap-2 sm:gap-3 px-5 sm:px-10 py-3 sm:py-4 font-bold text-sm sm:text-base transition-colors';
 
 interface RepTimerProps {
-  key?: React.Key;
   onRepComplete: (rep: Rep) => void;
-  targetTempo: WorkoutSession['targetTempo'];
+  targetTempo: Tempo;
   targetReps?: number;
   targetSets?: number;
-  currentRepCount?: number;
-  currentSet?: number;
-  totalRepsCompleted?: number;
-  isFinished?: boolean;
-  isPaused?: boolean;
-  onTogglePause: () => void;
+  reps?: Rep[];
   onReset: () => void;
+  onRunningChange?: (running: boolean) => void;
   seamlessTransitions?: boolean;
   fpsLimit?: FpsLimit;
+  soundEnabled?: boolean;
+  onToggleSound?: () => void;
+  isTimingsOpen?: boolean;
 }
 
-export default function RepTimer({ 
-  onRepComplete, 
-  targetTempo, 
-  targetReps = 12, 
+function formatTension(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return `${minutes}:${rest.toString().padStart(2, '0')}`;
+}
+
+export default function RepTimer({
+  onRepComplete,
+  targetTempo,
+  targetReps = 12,
   targetSets = 3,
-  currentRepCount = 1, 
-  currentSet = 1,
-  totalRepsCompleted = 0,
-  isFinished = false,
-  isPaused = false,
-  onTogglePause,
+  reps = [],
   onReset,
+  onRunningChange,
   seamlessTransitions = false,
-  fpsLimit = 40
+  fpsLimit = 60,
+  soundEnabled = true,
+  onToggleSound,
+  isTimingsOpen = false
 }: RepTimerProps) {
-  const [isActive, setIsActive] = useState(false);
-  const [isCountingDown, setIsCountingDown] = useState(false);
-  const [countdown, setCountdown] = useState(3);
-  const [currentPhase, setCurrentPhase] = useState<Phase | null>(null);
-  const [phaseStartTime, setPhaseStartTime] = useState<number | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showFullscreen, setShowFullscreen] = useState(true);
-  const [isControlsVisible, setIsControlsVisible] = useState(true);
-  const isControlsVisibleRef = useRef(true);
-  const wakeLockRef = useRef<any>(null);
-  
-  const currentRepRef = useRef<Partial<Rep>>({});
   const containerRef = useRef<HTMLDivElement>(null);
+  const confettiCanvasRef = useRef<HTMLCanvasElement>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
 
-  // Client-side detection for iOS to hide fullscreen button
+  const timer = usePhaseTimer({
+    tempo: targetTempo,
+    targetReps,
+    targetSets,
+    fpsLimit,
+    onRepComplete,
+    onPhaseStart: (phase: Phase) => playCue(cueForPhase(phase), soundEnabled),
+    onSetComplete: () => playCue('setComplete', soundEnabled),
+    onFinish: () => playCue('finish', soundEnabled)
+  });
+
+  const { status, currentPhase, isLive, completedReps } = timer;
+  const { isFullscreen, isSupported: isFullscreenSupported, toggle: toggleFullscreen } = useFullscreen(containerRef);
+  const { isVisible, isSuppressed } = useIdleControls(status === 'running' || status === 'countdown');
+
+  useWakeLock(isLive && status !== 'paused');
+
   useEffect(() => {
-    if (typeof window !== 'undefined' && navigator) {
-      const ios = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
-                  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      setShowFullscreen(!ios);
-    }
+    onRunningChange?.(isLive);
+  }, [isLive, onRunningChange]);
+
+  // Opening the timings modal mid-session pauses the clock underneath it.
+  const { pause: pauseTimer } = timer;
+  useEffect(() => {
+    if (isTimingsOpen) pauseTimer();
+  }, [isTimingsOpen, pauseTimer, status]);
+
+  useEffect(() => () => {
+    if (confirmTimerRef.current !== null) clearTimeout(confirmTimerRef.current);
   }, []);
 
-  const requestWakeLock = useCallback(async () => {
-    if ('wakeLock' in navigator) {
-      try {
-        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        if (!errorMsg.toLowerCase().includes('permissions policy') && !errorMsg.toLowerCase().includes('not allowed')) {
-          console.error('Wake Lock failed:', err);
-        }
-      }
-    }
-  }, []);
-
-  const releaseWakeLock = useCallback(async () => {
-    if (wakeLockRef.current) {
-      try {
-        await wakeLockRef.current.release();
-        wakeLockRef.current = null;
-      } catch (err) {
-        console.error('Wake Lock release failed:', err);
-      }
-    }
-  }, []);
-
-  // Wake Lock management
+  // Leaving the paused/set-break view cancels a pending "END?" confirmation.
   useEffect(() => {
-    if (isActive && !isPaused) {
-      const handleVisibilityChange = async () => {
-        if (document.visibilityState === 'visible') {
-          await requestWakeLock();
-        }
-      };
-
-      document.addEventListener('visibilitychange', handleVisibilityChange);
-      return () => {
-        document.removeEventListener('visibilitychange', handleVisibilityChange);
-        releaseWakeLock();
-      };
-    } else {
-      releaseWakeLock();
+    if (status === 'paused' || status === 'setBreak') return;
+    setConfirmStop(false);
+    if (confirmTimerRef.current !== null) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
     }
-  }, [isActive, isPaused, requestWakeLock, releaseWakeLock]);
+  }, [status]);
 
-  const getTargetForPhase = useCallback((phase: Phase) => {
-    switch (phase) {
-      case 'eccentric': return targetTempo.eccentric;
-      case 'pause_bottom': return targetTempo.pauseBottom;
-      case 'concentric': return targetTempo.concentric;
-      case 'pause_top': return targetTempo.pauseTop;
-    }
-  }, [targetTempo]);
+  const hiddenControls = !isVisible && (status === 'running' || status === 'countdown');
+  const controlsClass = cn(
+    'transition-opacity duration-300',
+    hiddenControls ? 'opacity-0 pointer-events-none' : 'opacity-100'
+  );
 
-  // Handle pause/resume sync
-  useEffect(() => {
-    if (!isPaused && isActive && phaseStartTime !== null && currentPhase) {
-      setPhaseStartTime(Date.now() - (elapsed * 1000));
-    }
-  }, [isPaused]);
+  const guard = useCallback((action: () => void) => () => {
+    if (isSuppressed()) return;
+    action();
+  }, [isSuppressed]);
 
-  // Activity detection with passive listeners and non-redundant state updates
-  useEffect(() => {
-    let idleTimer: ReturnType<typeof setTimeout>;
-    
-    const handleActivity = () => {
-      if (!isControlsVisibleRef.current) {
-        isControlsVisibleRef.current = true;
-        setIsControlsVisible(true);
-      }
-      clearTimeout(idleTimer);
-      if (!isPaused) {
-        idleTimer = setTimeout(() => {
-          isControlsVisibleRef.current = false;
-          setIsControlsVisible(false);
-        }, 10000);
-      }
-    };
+  const handleStart = guard(() => {
+    primeAudio();
+    timer.start();
+  });
 
-    handleActivity(); // Initial start
-    
-    const events = ['mousemove', 'mousedown', 'touchstart', 'keydown', 'wheel'] as const;
-    events.forEach(e => document.addEventListener(e, handleActivity, { passive: true }));
-    
-    return () => {
-      clearTimeout(idleTimer);
-      events.forEach(e => document.removeEventListener(e, handleActivity));
-    };
-  }, [isPaused]);
+  const handleStartSet = guard(() => {
+    primeAudio();
+    timer.startSet();
+  });
 
-  useEffect(() => {
-    const handlePopState = () => {
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
-      }
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  const handleResume = guard(() => {
+    primeAudio();
+    timer.resume();
+  });
 
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-      if (!document.fullscreenElement && window.history.state?.fullscreen) {
-        window.history.back();
-      }
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
-  }, []);
-
-  const toggleFullscreen = useCallback(() => {
+  const handlePause = guard(() => {
     triggerHaptic(15);
-    if (!containerRef.current) return;
-    
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => {
-        window.history.pushState({ fullscreen: true }, '');
-      }).catch(err => {
-        console.error(`Error attempting to enable fullscreen: ${err.message}`);
-      });
-    } else {
-      document.exitFullscreen();
-    }
-  }, []);
+    timer.pause();
+  });
 
-  const stopTimer = useCallback((shouldResetSession = true) => {
-    triggerHaptic(35); // Heavier rumble on stop
-    setIsActive(false);
-    setIsCountingDown(false);
-    setCurrentPhase(null);
-    setPhaseStartTime(null);
-    setElapsed(0);
-    if (shouldResetSession) {
-      onReset();
+  const handleToggleFullscreen = guard(() => {
+    triggerHaptic(15);
+    toggleFullscreen();
+  });
+
+  const handleToggleSound = guard(() => {
+    triggerHaptic(10);
+    onToggleSound?.();
+  });
+
+  const requestStop = guard(() => {
+    triggerHaptic(15);
+    if (!confirmStop) {
+      setConfirmStop(true);
+      if (confirmTimerRef.current !== null) clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = setTimeout(() => setConfirmStop(false), 3000);
+      return;
     }
+
+    if (confirmTimerRef.current !== null) clearTimeout(confirmTimerRef.current);
+    confirmTimerRef.current = null;
+    setConfirmStop(false);
+    triggerHaptic(35);
+    timer.stop();
+    onReset();
+  });
+
+  const handleNewSession = useCallback(() => {
+    triggerHaptic(20);
+    onReset();
   }, [onReset]);
 
-  useEffect(() => {
-    if (isFinished && isActive) {
-      stopTimer(false);
+  const handleRingTap = useCallback(() => {
+    if (status === 'paused') {
+      primeAudio();
+      timer.resume();
+      return;
     }
-  }, [isFinished, isActive, stopTimer]);
+    if (status === 'running' || status === 'countdown') {
+      timer.pause();
+    }
+  }, [status, timer]);
+
+  // Space mirrors the ring tap on desktop.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.repeat) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('button, a, input, textarea, select, [contenteditable="true"]')) return;
+      if (status !== 'running' && status !== 'countdown' && status !== 'paused') return;
+      event.preventDefault();
+      primeAudio();
+      timer.togglePause();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [status, timer]);
+
+  // Confetti fires once on the finished transition, on a canvas inside the card
+  // so it also shows in fullscreen (A3/A4).
+  const metricsRef = useRef({ tempo: targetTempo, targetReps, targetSets });
+  useEffect(() => {
+    metricsRef.current = { tempo: targetTempo, targetReps, targetSets };
+  }, [targetTempo, targetReps, targetSets]);
+  const wasFinishedRef = useRef(false);
 
   useEffect(() => {
-    if (isFinished) {
-      const repDuration = targetTempo.concentric + targetTempo.pauseTop + (targetTempo.eccentric || 0) + (targetTempo.pauseBottom || 0);
-      const totalSessionSeconds = repDuration * targetReps * targetSets;
-      const particles = Math.min(400, Math.max(100, Math.floor(totalSessionSeconds * 0.5)));
-
-      confetti({
+    const finished = status === 'finished';
+    if (finished && !wasFinishedRef.current) {
+      const { tempo, targetReps: repsTarget, targetSets: setsTarget } = metricsRef.current;
+      const particles = Math.min(400, Math.max(100, Math.floor(repDuration(tempo) * repsTarget * setsTarget * 0.5)));
+      const canvas = confettiCanvasRef.current;
+      const fire = canvas
+        ? confetti.create(canvas, { resize: true, useWorker: true })
+        : confetti;
+      fire({
         particleCount: particles,
         spread: 80,
-        origin: { y: 0.6 },
+        origin: { x: 0.5, y: 0.6 },
         colors: ['#ffffff', '#cbd5e1', '#94a3b8', '#64748b']
       });
     }
-  }, [isFinished, targetTempo, targetReps, targetSets]);
+    wasFinishedRef.current = finished;
+  }, [status]);
 
-  const startTimer = useCallback(() => {
-    triggerHaptic(20);
-    setIsCountingDown(true);
-    setCountdown(3);
-    requestWakeLock();
-  }, [requestWakeLock]);
+  const themeKey: ThemeKey = status === 'finished'
+    ? 'finished'
+    : status === 'countdown'
+      ? 'countdown'
+      : status === 'setBreak'
+        ? 'pause_bottom'
+        : currentPhase ?? 'idle';
 
-  const nextPhase = useCallback(() => {
-    if (!currentPhase || !phaseStartTime) return;
+  const ringColor = THEMES[themeKey].color;
+  const showBackground = status !== 'idle' && status !== 'paused';
+  const setInProgress = Math.min(Math.max(1, Math.floor(completedReps / Math.max(1, targetReps)) + 1), targetSets);
+  const completedSet = Math.min(Math.max(0, Math.floor(completedReps / Math.max(1, targetReps))), targetSets);
+  const setSegmentIndex = Math.min(Math.floor(completedReps / Math.max(1, targetReps)), targetSets - 1);
+  const progressVisible = status === 'running' || status === 'paused' || status === 'countdown';
 
-    const duration = (Date.now() - phaseStartTime) / 1000;
-    const rep = currentRepRef.current;
-    
-    let nextPhaseTarget: Phase = 'concentric';
+  const tension = useMemo(
+    () => formatTension(reps.reduce((total, rep) => total + (rep.totalDuration || 0), 0)),
+    [reps]
+  );
 
-    switch (currentPhase) {
-      case 'concentric':
-        rep.concentricDuration = duration;
-        nextPhaseTarget = 'pause_top';
-        break;
-      case 'pause_top':
-        rep.pauseTopDuration = duration;
-        nextPhaseTarget = 'eccentric';
-        break;
-      case 'eccentric':
-        rep.eccentricDuration = duration;
-        nextPhaseTarget = 'pause_bottom';
-        break;
-      case 'pause_bottom':
-        rep.pauseBottomDuration = duration;
-        const completeRep: Rep = {
-          ...rep as Rep,
-          totalDuration: (rep.concentricDuration || 0) + 
-                         (rep.pauseTopDuration || 0) + 
-                         (rep.eccentricDuration || 0) + 
-                         duration
-        };
-        onRepComplete(completeRep);
-
-        currentRepRef.current = { 
-          id: crypto.randomUUID(), 
-          timestamp: Date.now(),
-          eccentricDuration: 0,
-          concentricDuration: 0,
-          pauseTopDuration: 0,
-          pauseBottomDuration: 0,
-          totalDuration: 0
-        };
-        nextPhaseTarget = 'concentric';
-        break;
-    }
-    
-    setCurrentPhase(nextPhaseTarget);
-    setPhaseStartTime(Date.now());
-    setElapsed(0);
-  }, [currentPhase, phaseStartTime, onRepComplete]);
-
-  // Countdown effect
-  useEffect(() => {
-    if (isCountingDown && !isPaused) {
-      const interval = setInterval(() => {
-        setCountdown(prev => {
-          if (prev <= 1) {
-            clearInterval(interval);
-            setIsCountingDown(false);
-            setIsActive(true);
-            setCurrentPhase('concentric');
-            setPhaseStartTime(Date.now());
-            
-            currentRepRef.current = { 
-              id: crypto.randomUUID(), 
-              timestamp: Date.now(),
-              eccentricDuration: 0,
-              concentricDuration: 0,
-              pauseTopDuration: 0,
-              pauseBottomDuration: 0,
-              totalDuration: 0
-            };
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [isCountingDown, isPaused]);
-
-  // High-precision, frame-rate controlled animation loop
-  useEffect(() => {
-    if (isActive && phaseStartTime && currentPhase && !isPaused) {
-      const frameInterval = fpsLimit > 0 ? 1000 / fpsLimit : 0;
-      let lastTime = performance.now();
-      let animId: number;
-
-      const update = (nowTime: number) => {
-        if (frameInterval > 0) {
-          const delta = nowTime - lastTime;
-          if (delta < frameInterval) {
-            animId = window.requestAnimationFrame(update);
-            return;
-          }
-          lastTime = nowTime - (delta % frameInterval);
-        }
-
-        const now = Date.now();
-        const currentElapsed = Math.max(0, (now - phaseStartTime) / 1000);
-        setElapsed(currentElapsed);
-
-        const target = getTargetForPhase(currentPhase);
-        if (target === 0 || currentElapsed >= target) {
-          nextPhase();
-          return;
-        }
-        
-        animId = window.requestAnimationFrame(update);
-      };
-
-      animId = window.requestAnimationFrame(update);
-      return () => window.cancelAnimationFrame(animId);
-    }
-  }, [isActive, phaseStartTime, currentPhase, nextPhase, isPaused, fpsLimit, getTargetForPhase]);
-
-  const ringState = useMemo(() => {
-    if (isFinished) return RING_THEMES.finished;
-    if (isCountingDown) return RING_THEMES.countdown;
-    if (!currentPhase) return RING_THEMES.idle;
-    
-    const target = getTargetForPhase(currentPhase);
-    const rawProgress = target > 0 ? Math.min(elapsed / target, 1) : 1;
-    const progress = easeInOutCubic(rawProgress);
-    
-    switch (currentPhase) {
-      case 'concentric':
-        return { 
-          offset: 1244 * (1 - progress), 
-          ...RING_THEMES.concentric
-        };
-      case 'pause_top':
-        return { 
-          offset: 0, 
-          ...RING_THEMES.pause_top
-        };
-      case 'eccentric':
-        return { 
-          offset: 1244 * progress, 
-          ...RING_THEMES.eccentric
-        };
-      case 'pause_bottom':
-        return RING_THEMES.pause_bottom;
-      default:
-        return RING_THEMES.idle;
-    }
-  }, [isFinished, isCountingDown, currentPhase, getTargetForPhase, elapsed]);
-
-  const currentPhaseTarget = currentPhase ? getTargetForPhase(currentPhase) : 1;
-  const phaseProgress = (currentPhase && currentPhaseTarget > 0) ? Math.min(elapsed / currentPhaseTarget, 1) : 1;
-
-  const currentRepProgress = useMemo(() => {
-    if (!isActive || !currentPhase) return 0;
-    const eccentric = targetTempo.eccentric || 0;
-    const pauseBottom = targetTempo.pauseBottom || 0;
-    const concentric = targetTempo.concentric || 0;
-    const pauseTop = targetTempo.pauseTop || 0;
-    const totalRepTargetTime = eccentric + pauseBottom + concentric + pauseTop;
-    if (totalRepTargetTime === 0) return 0;
-
-    let accumulated = 0;
-    for (const ph of PHASES_ORDER) {
-      if (ph === currentPhase) break;
-      accumulated += getTargetForPhase(ph);
-    }
-    return Math.min(0.99, (accumulated + elapsed) / totalRepTargetTime);
-  }, [isActive, currentPhase, targetTempo, getTargetForPhase, elapsed]);
+  const isPaused = status === 'paused';
+  const displayColor = isPaused ? undefined : ringColor;
 
   return (
-    <div 
+    <div
       ref={containerRef}
       className={cn(
-        "flex flex-col items-center justify-between p-6 sm:p-8 bg-sleek-card border border-sleek-border shadow-2xl w-full h-full min-h-[450px] sm:min-h-[550px] relative overflow-hidden",
-        isFullscreen && "border-none"
+        'flex flex-col items-center justify-between p-6 sm:p-8 bg-sleek-card border border-sleek-border shadow-2xl w-full h-full relative overflow-hidden',
+        isFullscreen ? 'border-none min-h-0' : 'min-h-[450px] sm:min-h-[550px]'
       )}
     >
-      
-      {/* Real-time Background Gradient layers for hardware acceleration */}
-      <div className="absolute inset-0 z-0 pointer-events-none bg-[#171717]" />
-      
-      <div
-        className="absolute inset-0 z-0 pointer-events-none transition-all"
-        style={{
-          background: `linear-gradient(135deg, ${ringState.bgStart} 0%, ${ringState.bgEnd} 100%)`,
-          opacity: (!isPaused && (isActive || isCountingDown || isFinished)) ? 1 : 0,
-          transitionDuration: seamlessTransitions ? '1200ms' : '400ms',
-          transitionTimingFunction: 'linear',
-          willChange: 'opacity'
-        }}
-      />
-      
-      <div
-        className="absolute inset-0 z-0 pointer-events-none transition-[filter] duration-500 ease-out"
-        style={{
-          filter: `brightness(${Math.min(1.25, 1 + (((currentSet - 1) * targetReps + (currentRepCount - 1)) * 0.01))})`,
-          willChange: 'filter'
-        }}
-      />
-      
-      {/* Dark Overlay to ensure circle visibility */}
+      <RotateDeviceOverlay className="absolute inset-0 z-[70] pointer-events-auto" />
+
+      {/* One stacked gradient per theme, cross-faded by opacity (B1). */}
+      <div className="absolute inset-0 z-0 pointer-events-none bg-timer-base" />
+      {THEME_KEYS.map((key) => (
+        <div
+          key={key}
+          className="absolute inset-0 z-0 pointer-events-none"
+          style={{
+            background: `linear-gradient(135deg, ${THEMES[key].gradient[0]} 0%, ${THEMES[key].gradient[1]} 100%)`,
+            opacity: showBackground && themeKey === key ? 1 : 0,
+            transitionProperty: 'opacity',
+            transitionDuration: seamlessTransitions ? '1200ms' : '400ms',
+            transitionTimingFunction: 'linear'
+          }}
+        />
+      ))}
       <div className="absolute inset-0 bg-black/60 z-0 pointer-events-none" />
 
-      {/* Fullscreen Toggle Button - Unified, hidden on iOS */}
-      {showFullscreen && (
-        <button
-          onClick={toggleFullscreen}
-          className={cn(
-            "absolute sm:top-6 sm:right-6 sm:bottom-auto bottom-0 right-0 z-30 p-2 bg-white/5 border border-white/10 text-sleek-muted hover:text-sleek-text transition-all duration-300",
-            (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
-          )}
-          title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-        >
-          {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
-        </button>
-      )}
-      
-      {/* Top: Rep Counter */}
-      <div className="h-12 flex items-center justify-center w-full z-20">
-        <div 
-          className={cn(
-            "relative overflow-hidden px-4 sm:px-8 py-2 sm:py-4 border transition-all duration-1000 text-base sm:text-lg font-medium flex items-center gap-3 sm:gap-4",
-            (isActive || isCountingDown) ? "bg-[#1d1d1d] border-[#38393a] border-[3px] text-white" : "bg-white/5 border-sleek-border"
-          )}
-        >
-          {/* Session Progress Bar */}
-          <div className="absolute top-0 left-0 right-0 h-1.5 flex gap-[1px] bg-white/5">
-            {Array.from({ length: targetSets }).map((_, i) => {
-              const currentRepsInSession = totalRepsCompleted;
-              const setStartRepIdx = i * targetReps;
-              const repsCompletedInThisSet = Math.max(0, Math.min(targetReps, currentRepsInSession - setStartRepIdx));
-              let progress = repsCompletedInThisSet / targetReps;
-              
-              const isCurrentSet = Math.floor(currentRepsInSession / targetReps) === i;
-              if (isCurrentSet && !isFinished && isActive) {
-                progress += currentRepProgress / targetReps;
-              }
+      <canvas
+        ref={confettiCanvasRef}
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-40 h-full w-full"
+      />
 
+      {/* Sound + fullscreen controls, mirroring each other. */}
+      <div className={cn(
+        'absolute inset-x-0 bottom-0 sm:top-6 sm:bottom-auto sm:inset-x-6 z-30 flex items-center justify-between pointer-events-none',
+        controlsClass
+      )}>
+        <button
+          type="button"
+          onClick={handleToggleSound}
+          aria-label={soundEnabled ? 'Mute phase cues' : 'Unmute phase cues'}
+          className="pointer-events-auto p-2 h-11 w-11 flex items-center justify-center bg-white/5 border border-white/10 text-sleek-muted hover:text-sleek-text transition-colors"
+        >
+          {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+        </button>
+
+        {isFullscreenSupported && (
+          <button
+            type="button"
+            onClick={handleToggleFullscreen}
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            className="pointer-events-auto p-2 h-11 w-11 flex items-center justify-center bg-white/5 border border-white/10 text-sleek-muted hover:text-sleek-text transition-colors"
+          >
+            {isFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+          </button>
+        )}
+      </div>
+
+      {/* Top: rep/set counter with segmented set bar */}
+      <div className="h-12 flex items-center justify-center w-full z-20">
+        <div
+          className={cn(
+            'relative overflow-hidden px-4 sm:px-8 py-2 sm:py-4 border transition-colors duration-1000 text-base sm:text-lg font-medium flex items-center gap-3 sm:gap-4',
+            isLive ? 'bg-timer-surface border-timer-surface-border text-white' : 'bg-white/5 border-sleek-border'
+          )}
+        >
+          <div className="absolute top-0 left-0 right-0 h-1.5 flex gap-px bg-white/5">
+            {Array.from({ length: targetSets }).map((_, index) => {
+              const repsInSet = Math.min(targetReps, Math.max(0, completedReps - index * targetReps));
+              const isCurrent = index === setSegmentIndex && progressVisible;
               return (
-                <div key={i} className="flex-1 bg-white/10 relative overflow-hidden">
-                  <motion.div 
-                    className="absolute inset-y-0 left-0 bg-sleek-up"
-                    initial={false}
-                    animate={{ width: `${Math.min(100, progress * 100)}%` }}
-                    transition={{ type: "tween", ease: "linear", duration: 0.1 }}
-                  />
+                <div key={index} className="flex-1 bg-white/10 relative overflow-hidden">
+                  {isCurrent ? (
+                    <div
+                      ref={timer.progressRef}
+                      className="absolute inset-y-0 left-0 w-full bg-sleek-up origin-left scale-x-0"
+                    />
+                  ) : (
+                    <div
+                      className="absolute inset-y-0 left-0 bg-sleek-up"
+                      style={{ width: `${Math.min(100, (repsInSet / Math.max(1, targetReps)) * 100)}%` }}
+                    />
+                  )}
                 </div>
               );
             })}
           </div>
 
           <div className="flex items-center gap-1">
-            Rep 
-            <motion.span 
-              key={currentRepCount}
+            Rep
+            <motion.span
+              key={timer.currentRep}
               initial={{ y: -8, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              className={cn("font-bold inline-block ml-1", (isActive || isCountingDown) ? "text-white" : "text-sleek-text")}
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              className={cn('font-bold inline-block ml-1', isLive ? 'text-white' : 'text-sleek-text')}
             >
-              {currentRepCount.toString().padStart(2, '0')}
-            </motion.span> 
-            <span className={(isActive || isCountingDown) ? "text-white/60" : "text-sleek-muted"}>/ {targetReps}</span>
+              {timer.currentRep.toString().padStart(2, '0')}
+            </motion.span>
+            <span className={isLive ? 'text-white/60' : 'text-sleek-muted'}>/ {targetReps}</span>
           </div>
-          <div className={cn("w-px h-10 sm:h-4 flex-shrink-0", (isActive || isCountingDown) ? "bg-white/20" : "bg-sleek-border")} />
+          <div className={cn('w-px h-10 sm:h-4 flex-shrink-0', isLive ? 'bg-white/20' : 'bg-sleek-border')} />
           <div className="flex items-center gap-1">
-            Set 
-            <motion.span 
-              key={currentSet}
+            Set
+            <motion.span
+              key={timer.currentSet}
               initial={{ y: -8, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              className={cn("font-bold inline-block ml-1", (isActive || isCountingDown) ? "text-white" : "text-sleek-text")}
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              className={cn('font-bold inline-block ml-1', isLive ? 'text-white' : 'text-sleek-text')}
             >
-              {currentSet}
-            </motion.span> 
-            <span className={(isActive || isCountingDown) ? "text-white/60" : "text-sleek-muted"}>/ {targetSets}</span>
+              {timer.currentSet}
+            </motion.span>
+            <span className={isLive ? 'text-white/60' : 'text-sleek-muted'}>/ {targetSets}</span>
           </div>
         </div>
       </div>
 
-      {/* Middle: Circle + Timer */}
+      {/* Middle: ring and timer readout */}
       <div className="relative flex items-center justify-center w-[min(calc(85vw-10px),340px)] h-[min(calc(85vw-10px),340px)] my-6 sm:my-8 z-10">
-        <div 
+        <div
           className={cn(
-            "absolute inset-0 transition-all duration-1000 backdrop-blur-md rounded-full z-0",
-            (isActive || isCountingDown) ? "bg-[#1d1d1d]" : "bg-[#252729]/80"
-          )} 
+            'absolute inset-0 rounded-full z-0 transition-colors duration-1000',
+            isLive ? 'bg-timer-surface' : 'bg-timer-idle-surface/80'
+          )}
         />
         <div className="absolute inset-0 border-4 border-white/10 rounded-full z-0" />
-        
-        {/* Phase Transition Ripple */}
+
         <AnimatePresence>
-          {isActive && !isPaused && phaseStartTime && (
+          {status === 'running' && (
             <motion.div
-              key={`ripple-${phaseStartTime}`}
-              initial={{ opacity: 0.8, scale: 0.95, borderColor: ringState.color, borderWidth: 8 }}
-              animate={{ opacity: 0, scale: 2.8, borderWidth: 2 }}
+              key={`ripple-${timer.phaseKey}`}
+              initial={{ opacity: 0.8, scale: 0.95 }}
+              animate={{ opacity: 0, scale: 2.8 }}
               exit={{ opacity: 0 }}
-              transition={{ 
-                duration: 0.6, 
-                ease: [0.22, 1, 0.36, 1]
-              }}
-              className="absolute inset-0 rounded-full pointer-events-none z-0 will-change-[transform,opacity,border-width]"
-              style={{ borderStyle: 'solid' }}
+              transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+              className="absolute inset-0 rounded-full pointer-events-none z-0 border-8"
+              style={{ borderColor: ringColor, borderStyle: 'solid' }}
             />
           )}
         </AnimatePresence>
 
-        {(isActive || isCountingDown || isFinished) && (
-          <svg 
-            className="absolute inset-0 w-full h-full -rotate-90 z-10 pointer-events-none" 
+        {(isLive || status === 'finished') && (
+          <svg
+            className="absolute inset-0 w-full h-full -rotate-90 z-10 pointer-events-none"
             viewBox="0 0 400 400"
+            aria-hidden="true"
           >
-              <motion.circle
-                cx="200"
-                cy="200"
-                r="198"
-                fill="none"
-                strokeWidth="6"
-                strokeDasharray="1244"
-                strokeDashoffset={ringState.offset}
-                initial={{ stroke: ringState.color }}
-                animate={{ stroke: ringState.color }}
-                transition={{ 
-                  stroke: { duration: 0.35, ease: "linear" },
-                  strokeDashoffset: { duration: 0 }
-                }}
-                strokeLinecap="round"
-                className="will-change-[stroke-dashoffset,stroke]"
-              />
+            <circle
+              ref={timer.ringRef}
+              cx="200"
+              cy="200"
+              r={RING_RADIUS}
+              fill="none"
+              strokeWidth="6"
+              strokeDasharray={RING_LENGTH}
+              strokeDashoffset={RING_LENGTH}
+              strokeLinecap="round"
+              style={{
+                stroke: ringColor,
+                strokeOpacity: 0,
+                transition: 'stroke 350ms linear'
+              }}
+            />
           </svg>
         )}
 
-        {/* Timer Text */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center z-20">
-          <AnimatePresence mode="wait">
-            {isFinished ? (
+        {/* One-tap pause/resume target over the ring (D4). */}
+        <button
+          type="button"
+          onClick={handleRingTap}
+          disabled={status === 'idle' || status === 'finished' || status === 'setBreak'}
+          aria-label={status === 'paused' ? 'Resume session' : 'Pause session'}
+          className="absolute inset-0 z-30 rounded-full cursor-pointer disabled:cursor-default focus:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+        />
+
+        <div className="absolute inset-0 flex flex-col items-center justify-center z-20 pointer-events-none">
+          <AnimatePresence initial={false}>
+            {status === 'finished' ? (
               <motion.div
                 key="finished"
                 initial={{ opacity: 0, scale: 0.5 }}
                 animate={{ opacity: 1, scale: 1.2 }}
                 exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.15 } }}
-                transition={{ type: "spring", stiffness: 300, damping: 20 }}
-                className="absolute inset-0 flex items-center justify-center"
+                transition={{ type: 'spring', stiffness: 300, damping: 20 }}
+                className="absolute inset-0 flex flex-col items-center justify-center text-center"
               >
-                <div className="absolute text-sleek-text uppercase tracking-[4px] text-[10px] sm:text-xs -translate-y-[3.5rem] sm:-translate-y-[4.5rem] font-bold whitespace-nowrap">WORKOUT COMPLETE</div>
+                <div className="uppercase tracking-[4px] text-[11px] sm:text-xs -translate-y-[3.5rem] sm:-translate-y-[4.5rem] font-bold whitespace-nowrap text-sleek-text">
+                  WORKOUT COMPLETE
+                </div>
                 <div className="text-[50px] sm:text-[70px] font-black leading-none text-sleek-text relative">
                   FINISH!
                 </div>
-              </motion.div>
-            ) : isCountingDown ? (
-              <motion.div
-                key={`countdown-${countdown}`}
-                initial={{ opacity: 0, scale: 0.5 }}
-                animate={{ opacity: 1, scale: 1.2 }}
-                exit={{ opacity: 0, scale: 1.5, transition: { duration: 0.15 } }}
-                transition={{ type: "spring", stiffness: 400, damping: 20 }}
-                className="absolute inset-0 flex items-center justify-center"
-              >
-                <div className="absolute text-sleek-muted uppercase tracking-[4px] text-sm -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap">GET READY</div>
-                <div className="text-[100px] sm:text-[140px] font-black leading-none text-sleek-text tabular-nums text-center w-full">
-                  {countdown}
+                <div className="mt-3 text-[11px] sm:text-xs font-semibold uppercase tracking-widest text-white/80">
+                  {targetSets} × {targetReps} · {tension} under tension
                 </div>
               </motion.div>
-            ) : !isActive ? (
+            ) : status === 'countdown' ? (
+              <motion.div
+                key="countdown"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ duration: 0.15 }}
+                className="absolute inset-0 flex items-center justify-center"
+              >
+                <div className="absolute uppercase tracking-[4px] text-sm -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap text-sleek-muted">
+                  GET READY
+                </div>
+                <motion.div
+                  key={timer.countdown}
+                  initial={{ opacity: 0, scale: 0.6 }}
+                  animate={{ opacity: 1, scale: 1.15 }}
+                  transition={{ duration: 0.25 }}
+                  className="text-[100px] sm:text-[140px] font-black leading-none text-sleek-text tabular-nums text-center w-full"
+                >
+                  {timer.countdown}
+                </motion.div>
+              </motion.div>
+            ) : status === 'idle' ? (
               <motion.div
                 key="idle"
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.15 } }}
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                transition={{ type: 'spring', stiffness: 300, damping: 25 }}
                 className="absolute inset-0 flex items-center justify-center"
               >
-                <div className="absolute text-sleek-muted uppercase tracking-[2px] sm:tracking-[4px] text-xs sm:text-sm -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap">READY TO START</div>
-                <div className="text-6xl sm:text-[90px] font-extrabold leading-none text-sleek-text tabular-nums relative">00.0</div>
+                <div className="absolute uppercase tracking-[2px] sm:tracking-[4px] text-[11px] sm:text-sm -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap text-sleek-muted">
+                  READY TO START
+                </div>
+                <div className="text-7xl sm:text-[100px] font-extrabold leading-none text-sleek-text tabular-nums relative">
+                  00.0
+                </div>
               </motion.div>
             ) : (
               <motion.div
-                key="active"
-                initial={{ opacity: 0, scale: 0.8 }}
+                key="live"
+                initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.15 } }}
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.15 } }}
+                transition={{ type: 'spring', stiffness: 300, damping: 25 }}
                 className="absolute inset-0 flex items-center justify-center"
               >
-                <motion.div 
-                  key={`label-${phaseStartTime}`}
-                  initial={{ y: 5, opacity: 0 }}
-                  animate={{ y: 0, opacity: 1 }}
-                  transition={{ type: "spring", stiffness: 300, damping: 25 }}
-                  className="absolute -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap"
-                >
-                  <motion.div 
-                    className="text-sleek-text uppercase tracking-[2px] sm:tracking-[4px] text-sm sm:text-base font-black origin-bottom inline-block will-change-transform antialiased"
-                    animate={
-                      isPaused ? { scale: 1, y: 0 } :
-                      !currentPhase || currentPhaseTarget <= 0 ? { scale: 1, y: 0 } :
-                      currentPhase === 'concentric' ? { scale: 1 + 0.5 * phaseProgress, y: -15 * phaseProgress } :
-                      currentPhase === 'pause_top' ? { scale: 1.5, y: -15 } :
-                      currentPhase === 'eccentric' ? { scale: 1.5 - 0.5 * phaseProgress, y: -15 + 15 * phaseProgress } :
-                      { scale: 1, y: 0 }
-                    }
-                    transition={{ type: "spring", stiffness: 300, damping: 25, mass: 1 }}
-                  >
-                    <div
-                      style={{
-                        transform: currentPhase === 'pause_top' && !isPaused
-                          ? `translate3d(${Math.sin(elapsed * 20)}px, ${Math.cos(elapsed * 18)}px, 0)`
-                          : 'none',
-                        willChange: currentPhase === 'pause_top' && !isPaused ? 'transform' : 'auto'
-                      }}
-                    >
-                      {isPaused ? 'SESSION PAUSED' : (currentPhase ? PHASE_LABELS[currentPhase] : '')}
+                {status === 'setBreak' ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                    <div className="uppercase tracking-[4px] text-[11px] sm:text-xs font-bold text-white/70 mb-3">
+                      SET {completedSet} OF {targetSets} DONE
                     </div>
-                  </motion.div>
-                </motion.div>
-                <div 
-                  className={cn(
-                    "tabular-nums transition-colors duration-300 relative text-8xl sm:text-[100px] font-extrabold leading-none",
-                    isPaused ? "text-sleek-muted" : ""
-                  )}
-                  style={{ color: !isPaused ? ringState.color : undefined }}
-                >
-                  {elapsed.toFixed(1)}
-                </div>
+                    <div className="text-3xl sm:text-4xl font-black leading-tight text-sleek-text whitespace-nowrap">
+                      SET {completedSet} COMPLETE
+                    </div>
+                    <div className="mt-4 text-[11px] sm:text-xs font-semibold uppercase tracking-widest text-white/70">
+                      {targetReps} reps banked
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="absolute -translate-y-[4rem] sm:-translate-y-[5.5rem] whitespace-nowrap">
+                      <div
+                        key={timer.phaseKey}
+                        ref={timer.labelRef}
+                        className="origin-bottom text-sleek-text uppercase tracking-[2px] sm:tracking-[4px] text-sm sm:text-base font-black antialiased"
+                      >
+                        <span
+                          className={cn(
+                            'inline-block',
+                            status === 'running' && currentPhase === 'pause_top' && 'animate-hold-shake'
+                          )}
+                        >
+                          {isPaused
+                            ? 'SESSION PAUSED'
+                            : currentPhase
+                              ? PHASE_META[currentPhase].label
+                              : ''}
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      ref={timer.numberRef}
+                      className={cn(
+                        'tabular-nums transition-colors duration-300 relative text-7xl sm:text-[100px] font-extrabold leading-none',
+                        isPaused ? 'text-sleek-muted' : ''
+                      )}
+                      style={{ color: displayColor }}
+                    >
+                      00.0
+                    </div>
+                  </>
+                )}
               </motion.div>
             )}
           </AnimatePresence>
         </div>
       </div>
 
-      {/* Bottom: Controls */}
+      {/* Bottom: controls */}
       <div className="relative h-16 flex items-center justify-center w-full z-20">
-        {isFinished ? (
-          <motion.div
+        {status === 'finished' ? (
+          <motion.button
+            type="button"
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="flex items-center gap-2 sm:gap-3 bg-sleek-card border border-sleek-border text-sleek-text px-6 sm:px-10 py-3 sm:py-4 font-bold text-sm sm:text-base"
+            onClick={handleNewSession}
+            className={cn('w-full max-w-[240px] sm:max-w-[380px] h-full', CONTROL_SHAPE, CONTROL_PRIMARY)}
           >
-            <CheckCircle2 size={18} className="sm:w-5 sm:h-5 text-sleek-text" />
-            SESSION COMPLETE
-          </motion.div>
+            <Play size={18} fill="currentColor" className="sm:w-5 sm:h-5" />
+            <span>NEW SESSION</span>
+          </motion.button>
         ) : (
-          <div className="flex w-full max-w-[240px] sm:max-w-[380px] h-full gap-0">
-            {isPaused && (isActive || isCountingDown) ? (
+          <div className={cn(
+            'flex w-full max-w-[240px] sm:max-w-[380px] h-full',
+            controlsClass
+          )}>
+            {status === 'paused' ? (
               <>
                 <motion.button
+                  type="button"
                   whileTap={{ scale: 0.98 }}
-                  onClick={() => stopTimer(true)}
-                  className={cn(
-                    "w-1/4 flex items-center justify-center bg-[#1d1d1d] border-[#38393a] border-[3px] text-white",
-                    (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
-                  )}
+                  onClick={requestStop}
+                  aria-label={confirmStop ? 'Confirm end session' : 'End session'}
+                  className={cn('w-1/4 h-full', CONTROL_SHAPE, CONTROL_SOLID, confirmStop && 'text-red-300')}
                 >
-                  <Square size={20} fill="currentColor" />
+                  {confirmStop ? <span className="text-[11px] font-bold">END?</span> : <Square size={20} fill="currentColor" />}
                 </motion.button>
                 <motion.button
+                  type="button"
                   whileTap={{ scale: 0.98 }}
-                  onClick={onTogglePause}
-                  className={cn(
-                    "w-3/4 flex items-center justify-center gap-2 bg-[#1d1d1d] border-[#38393a] border-[3px] border-l-0 text-white font-bold text-sm sm:text-base",
-                    (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
-                  )}
+                  onClick={handleResume}
+                  className={cn('w-3/4 h-full border-l-0', CONTROL_SHAPE, CONTROL_SOLID)}
                 >
                   <Play size={18} fill="currentColor" />
                   RESUME
                 </motion.button>
               </>
+            ) : status === 'setBreak' ? (
+              <>
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.98 }}
+                  onClick={requestStop}
+                  aria-label={confirmStop ? 'Confirm end session' : 'End session'}
+                  className={cn('w-1/4 h-full', CONTROL_SHAPE, CONTROL_SOLID, confirmStop && 'text-red-300')}
+                >
+                  {confirmStop ? <span className="text-[11px] font-bold">END?</span> : <Square size={20} fill="currentColor" />}
+                </motion.button>
+                <motion.button
+                  type="button"
+                  whileTap={{ scale: 0.98 }}
+                  onClick={handleStartSet}
+                  className={cn('w-3/4 h-full border-l-0', CONTROL_SHAPE, CONTROL_SOLID)}
+                >
+                  <Play size={18} fill="currentColor" />
+                  START SET {Math.min(setInProgress, targetSets)}
+                </motion.button>
+              </>
             ) : (
               <motion.button
+                type="button"
                 whileTap={{ scale: 0.95 }}
-                onClick={(isActive || isCountingDown) ? onTogglePause : startTimer}
+                onClick={status === 'idle' ? handleStart : handlePause}
                 className={cn(
-                  "w-full flex items-center justify-center gap-2 sm:gap-3 px-5 sm:px-10 py-3 sm:py-4 font-bold text-sm sm:text-base border",
-                  (isActive || isCountingDown) 
-                    ? "bg-[#1d1d1d] border-[#38393a] border-[3px] text-white" 
-                    : "bg-sleek-up border-transparent text-black shadow-[0_0_30px_rgba(255,255,255,0.3)]",
-                  (!isControlsVisible && (isActive || isCountingDown) && !isPaused) && "opacity-0 pointer-events-none"
+                  'w-full h-full',
+                  CONTROL_SHAPE,
+                  status === 'idle' ? CONTROL_PRIMARY : CONTROL_SOLID
                 )}
               >
-                {(isActive || isCountingDown) ? (
-                  <>
-                    <Pause size={18} fill="currentColor" className="sm:w-5 sm:h-5" />
-                    <span>PAUSE SESSION</span>
-                  </>
-                ) : (
+                {status === 'idle' ? (
                   <>
                     <Play size={18} fill="currentColor" className="sm:w-5 sm:h-5" />
                     <span>START SESSION</span>
+                  </>
+                ) : (
+                  <>
+                    <Pause size={18} fill="currentColor" className="sm:w-5 sm:h-5" />
+                    <span>PAUSE SESSION</span>
                   </>
                 )}
               </motion.button>
